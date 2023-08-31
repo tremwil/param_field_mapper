@@ -1,4 +1,6 @@
 #include "param_field_mapper.h"
+#include "spdlog/sinks/wincolor_sink.h"
+#include "spdlog/spdlog.h"
 #include <Windows.h>
 #include <stdio.h>
 #include <iostream>
@@ -35,8 +37,13 @@ void create_console() {
 
 DWORD main_thread(HMODULE module) {
 	create_console();	
+	
+  	std::locale::global(std::locale("en_us.UTF-8"));
 	set_pattern("[%T.%e] %^[%l]%$ [%s] %v");
 	set_level(level::level_enum::trace);
+
+	auto console_sink = spdlog::create<spdlog::sinks::wincolor_stdout_sink_mt>("default");
+	set_default_logger(console_sink);
 
 	ParamFieldMapper::get().init();
 	return 0;

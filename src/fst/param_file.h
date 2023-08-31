@@ -63,21 +63,34 @@ namespace pfm
             return (ParamRow<Offset>*)((uint8_t*)this + id_table_offset());
         }
 
+        inline size_t id_table_end_offset() const {
+            auto id_table_entry_sz = is_64_bit() ? sizeof(ParamRow<uint64_t>) : sizeof(ParamRow<uint32_t>);
+            return id_table_offset() + id_table_entry_sz * row_count; 
+        }
+
         inline uint32_t row_id_at(size_t index) const {
             return is_64_bit() ? id_table<uint64_t>()[index].id : id_table<uint32_t>()[index].id;
         }
 
-        inline void* row_data_at(size_t index) const {
-            return (uint8_t*)this + (is_64_bit() ? 
+        inline size_t row_data_offset_at(size_t index) const {
+            return is_64_bit() ? 
                 id_table<uint64_t>()[index].data_offset : 
-                id_table<uint32_t>()[index].data_offset);
+                id_table<uint32_t>()[index].data_offset;
+        }
+
+        inline void* row_data_at(size_t index) const {
+            return (uint8_t*)this + row_data_offset_at(index);
         }
 
         inline std::optional<size_t> row_size() const {
-            if (this->row_count == 0) return std::nullopt;
-
-            auto data_end = (format_flags_2d & 0x80) ? param_type_offset : strings_offset;
-            return (uint8_t*)this + data_end - (uint8_t*)row_data_at(this->row_count - 1);
+            if (this->row_count > 1) {
+                return (intptr_t)row_data_at(1) - (intptr_t)row_data_at(0);
+            }
+            else if (this->row_count > 0) {
+                auto data_end = (format_flags_2d & 0x80) ? param_type_offset : strings_offset;
+                return (uint8_t*)this + data_end - (uint8_t*)row_data_at(this->row_count - 1);
+            }
+            else return std::nullopt;
         }
 
         template<class Char>

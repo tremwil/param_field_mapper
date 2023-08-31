@@ -1,6 +1,7 @@
 #pragma once
 #include <Windows.h>
 #include <filesystem>
+#include <span>
 
 #include "panic.h"
 #include "template_utils.h"
@@ -123,8 +124,61 @@ namespace pfm
 			return region;
 		}
 
+		template<std::invocable<> F>
+		void patch_memory(mem::pointer address, size_t size, F fun) 
+		{
+			auto lpvoid = address.as<LPVOID>();
+			DWORD old_protect;
+			VirtualProtect(lpvoid, size, PAGE_EXECUTE_READWRITE, &old_protect);
+			fun();
+			VirtualProtect(lpvoid, size, old_protect, &old_protect);
+		}
+
+		template<std::invocable<> F>
+		void patch_memory(std::span<uint8_t> region, F fun)
+		{
+			patch_memory(region.data(), region.size(), fun);
+		}
+
+		constexpr inline bool is_power_of_2(size_t n) {
+			return (n & (n-1)) == 0;
+		}
+
+		constexpr inline size_t align_up(size_t n, size_t alignment)
+		{
+			if (is_power_of_2(alignment)) {
+				return (n + alignment - 1) & ~(alignment - 1);
+			}
+			else {
+				size_t m = n + alignment - 1;
+				return m - (m % alignment);
+			}
+		}
+
+		constexpr inline size_t align_down(size_t n, size_t alignment)
+		{
+			if (is_power_of_2(alignment)) {
+				return n & ~(alignment - 1);
+			}
+			else {
+				return n - (n % alignment);
+			}
+		}
+
+		template<typename T>
+		inline T* align_up(T* ptr, size_t alignment)
+		{
+			return (T*)align_up((size_t)ptr, alignment);
+		}
+
+		template<typename T>
+		inline T* align_down(T* ptr, size_t alignment)
+		{
+			return (T*)align_down((size_t)ptr, alignment);
+		}
+
 		template<typename E>
-		bool test_enum(E a, E b)
+		constexpr bool test_enum(E a, E b)
 		{
 			using T = typename std::underlying_type<E>::type;
 			return (static_cast<T>(a) & static_cast<T>(b)) != 0;

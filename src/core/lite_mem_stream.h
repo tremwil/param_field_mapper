@@ -4,7 +4,7 @@
 #include <span>
 #include <optional>
 
-namespace SO
+namespace pfm
 {
     /// Simple stream over a span of bytes in memory. 
 	struct LiteMemStream
@@ -15,36 +15,64 @@ namespace SO
 		uint8_t* current;
 
 	public:
-		constexpr LiteMemStream(std::span<uint8_t> buffer) : begin(buffer.data()), end(buffer.data() + buffer.size()), current(buffer.data()) {}
-		constexpr LiteMemStream(uint8_t* begin, uint8_t* end) : begin(begin), end(end), current(begin) {}
-		constexpr LiteMemStream(uint8_t* data, size_t size) : begin(data), end(data + size), current(data) {}
+		constexpr inline LiteMemStream() : begin(nullptr), end(nullptr), current(nullptr) {}
+		constexpr inline LiteMemStream(std::span<uint8_t> buffer) : begin(buffer.data()), end(buffer.data() + buffer.size()), current(buffer.data()) {}
+		constexpr inline LiteMemStream(uint8_t* begin, uint8_t* end) : begin(begin), end(end), current(begin) {}
+		constexpr inline LiteMemStream(uint8_t* data, size_t size) : begin(data), end(data + size), current(data) {}
 
-		constexpr bool is_eof() const noexcept {
+		constexpr inline bool is_eof() const noexcept {
 			return current >= end;
 		}
 
-		constexpr std::span<uint8_t> buffer() const noexcept {
+		constexpr inline std::span<uint8_t> buffer() const noexcept {
 			return std::span(begin, end);
 		}
 
-		constexpr std::span<uint8_t> consumed() const noexcept {
+		constexpr inline std::span<uint8_t> consumed() const noexcept {
 			return std::span(begin, current);
 		}
 
-		constexpr std::span<uint8_t> remaining() const noexcept {
+		constexpr inline std::span<uint8_t> remaining() const noexcept {
 			return std::span(current, end);
 		}
 
-		bool seek(size_t position) noexcept {
-			if (position < (size_t)end - (size_t)begin) {
+		constexpr inline uint8_t* ptr() const noexcept {
+			return current;
+		}
+
+		constexpr inline size_t pos() const noexcept {
+			return current - begin;
+		}
+
+		constexpr inline bool seek(size_t position) noexcept {
+			if (position < (size_t)(end - begin)) {
 				current = begin + position;
 				return true;
 			}
 			return false;
 		}
 
-		bool advance(size_t num_bytes) noexcept {
+		constexpr inline bool seek_ptr(uint8_t* ptr) noexcept {
+			if (ptr >= begin && ptr < end) {
+				current = ptr;
+				return true;
+			}
+			return false;
+		}
+
+		constexpr inline bool advance(size_t num_bytes) noexcept {
 			current += num_bytes;
+			return current < end;
+		}
+
+		inline bool align(size_t alignment) noexcept {
+			auto s = (uintptr_t)current + alignment - 1;
+			if ((alignment & (alignment - 1)) == 0) {
+				current = (uint8_t*)(s & ~(alignment - 1));
+			}
+			else {
+				current = (uint8_t*)(s - s % alignment);
+			}
 			return current < end;
 		}
 
