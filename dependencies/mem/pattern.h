@@ -286,7 +286,7 @@ namespace mem
         {
             const byte* const pat_masks = masks();
 
-            for (std::size_t i = last; MEM_LIKELY((current[i] & pat_masks[i]) != pat_bytes[i]); --i)
+            for (std::size_t i = last; MEM_UNLIKELY((current[i] & pat_masks[i]) == pat_bytes[i]); --i)
             {
                 if (MEM_UNLIKELY(i == 0))
                     return true;
@@ -296,7 +296,7 @@ namespace mem
         }
         else
         {
-            for (std::size_t i = last; MEM_LIKELY(current[i] != pat_bytes[i]); --i)
+            for (std::size_t i = last; MEM_UNLIKELY(current[i] == pat_bytes[i]); --i)
             {
                 if (MEM_UNLIKELY(i == 0))
                     return true;
