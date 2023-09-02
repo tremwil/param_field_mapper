@@ -182,7 +182,7 @@ namespace pfm
 
         // jl normal_behavior
         write<uint8_t>(0x7C);
-        write<uint8_t>(17 + sizeof(restore_registers) - 1 + disasm_patched.len);
+        write<uint8_t>(17 + restore_registers.size() + disasm_patched.len);
 
         // movabs rbx, region_begin
         write<uint16_t>(0xBB48);
@@ -192,7 +192,7 @@ namespace pfm
 
         // jae normal_behavior
         write<uint8_t>(0x73);
-        write<uint8_t>(2 + sizeof(restore_registers) - 1 + disasm_patched.len);
+        write<uint8_t>(2 + restore_registers.size() + disasm_patched.len);
 
         // {restore registers}
         write(restore_registers);
@@ -201,7 +201,7 @@ namespace pfm
 
         // jmp end
         write<uint8_t>(0xEB);
-        write<uint8_t>(sizeof(restore_registers) - 1 + disasm_orig.len);
+        write<uint8_t>(restore_registers.size() + disasm_orig.len);
 
         /* normal_behavior: */
 

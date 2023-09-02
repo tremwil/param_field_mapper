@@ -2,10 +2,8 @@ cmake_minimum_required(VERSION 3.23)
 project(
     param_field_mapper 
     VERSION 0.0.1 
-    LANGUAGES C CXX
+    LANGUAGES CXX C
 )
-
-set(CMAKE_CXX_STANDARD 20)
 
 set(OUT_DIR ${CMAKE_SOURCE_DIR}/bin/${CMAKE_BUILD_TYPE}/)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${OUT_DIR})

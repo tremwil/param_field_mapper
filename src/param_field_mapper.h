@@ -3,6 +3,7 @@
 #include <set>
 #include <map>
 #include <unordered_map>
+#include <vcruntime.h>
 
 #include "core/singleton.h"
 #include "fst/fd4_param_repository.h"
@@ -49,6 +50,8 @@ namespace pfm
         bool is_init = false;
 
         std::unordered_set<intptr_t> patches;
+        std::unordered_map<intptr_t, intptr_t> patch_map;
+
         HookArenaPool hook_arena_pool;
         LiteMemStream remap_arena;
         size_t committed_remap_mem = 0;
@@ -63,11 +66,28 @@ namespace pfm
         // so we can use map::upper_bound
         std::map<intptr_t, RemappedParamFile> remaps;
 
+        uint8_t* (*orig_memcpy)(uint8_t*, uint8_t*, size_t); 
+
+        void hook_memcpy();
+
         void remap_param_file(ParamFileCap& file_cap);
         LONG veh(EXCEPTION_POINTERS* ex);
 
         static LONG veh_thunk(EXCEPTION_POINTERS* ex) {
             return ParamFieldMapper::get().veh(ex);
+        }
+
+        uint8_t* memcpy_hook(uint8_t* dest, uint8_t* src, size_t size) {
+            const uint8_t* remap_begin = remap_arena.buffer().data();
+            const uint8_t* remap_end = remap_begin + remap_arena.buffer().size();
+            if (remap_begin <= src && src < remap_end) {
+                return orig_memcpy(dest, src + shift, size);
+            }
+            else return orig_memcpy(dest, src, size);
+        }
+
+        static uint8_t* memcpy_hook_thunk(uint8_t* dest, uint8_t* src, size_t size) {
+            return get().memcpy_hook(dest, src, size);
         }
     };
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <initializer_list>
 #include <iostream>
 #include <span>
 #include <optional>
@@ -240,6 +241,16 @@ namespace pfm
 			else return false;
 		}
 
+		constexpr inline bool write(const std::string_view& val) noexcept
+		{
+			if (current + val.size() <= end) {
+				std::copy(val.begin(), val.end(), current);
+				current += val.size();
+				return true;
+			}
+			else return false;
+		}
+
 		template<typename It, typename T = typename std::iterator_traits<It>::value_type> requires std::is_standard_layout<T>::value
 		constexpr inline bool write(It first, It last) noexcept
 		{
@@ -249,6 +260,16 @@ namespace pfm
 			if (current + num * sizeof(T) <= end) {
 				std::copy(first, last, (std::remove_const_t<T>*)current);
 				current += num * sizeof(T);
+				return true;
+			}
+			else return false;
+		}
+
+		constexpr inline bool write(const std::initializer_list<uint8_t>& val) noexcept
+		{
+			if (current + val.size() <= end) {
+				std::copy(val.begin(), val.end(), current);
+				current += val.size();
 				return true;
 			}
 			else return false;

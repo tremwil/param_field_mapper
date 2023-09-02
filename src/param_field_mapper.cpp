@@ -1,15 +1,22 @@
 #include "param_field_mapper.h"
 #include "core/utils.h"
+#include "hooks/control_flow_graph.h"
 #include "hooks/instr_utils.h"
 #include "arxan_disabler.h"
 
+#include "hooks/trampoline.h"
+#include "spdlog/spdlog.h"
 #include "zydis/Zydis.h"
+
+#include "mem/pattern.h"
 
 #include <Windows.h>
 #include <algorithm>
 #include <conio.h>
+#include <excpt.h>
 #include <spdlog/fmt/bin_to_hex.h>
 
+#include <winnt.h>
 #include <winternl.h>
 
 void suspend_threads()
@@ -37,11 +44,21 @@ namespace pfm
 
         arxan_disabler::disable_code_restoration();
 
-        SPDLOG_INFO("Finding JMP targets...");
+        SPDLOG_INFO("Finding potential JMP targets...");
         if (!instr_utils::jmp_targets_heuristic(nullptr, jmp_targets_heuristic)) {
             Panic("JMP targets heuristic failed");
         }
         SPDLOG_INFO("Done, found {:L} potential targets", jmp_targets_heuristic.size());
+
+        SPDLOG_INFO("Computing program-wide CFG...");
+        uint8_t* module_base = (uint8_t*)GetModuleHandle(NULL);
+        auto ex_tbl = cfg_utils::get_exception_table(module_base);
+        for (const auto& rf: ex_tbl) {
+            auto cinfo = (UNWIND_INFO*)(module_base + rf.UnwindInfoAddress);
+            if (cinfo->Flags & UNW_FLAG_CHAININFO) continue;
+            flow_graph.walk((intptr_t)module_base + rf.BeginAddress);
+        }
+        SPDLOG_INFO("Done, walked {} functions in exception table", ex_tbl.size());
 
         SPDLOG_INFO("Waiting for params...");
         auto param_repo = FD4ParamRepository::wait_until_loaded();
@@ -79,6 +96,7 @@ namespace pfm
         }
         remap_arena = { alloc_base, committed_remap_mem };
 
+        hook_memcpy();
         AddVectoredExceptionHandler(TRUE, &ParamFieldMapper::veh_thunk);
         for (auto& file_cap: param_repo->param_container) {
             remap_param_file(file_cap);
@@ -89,6 +107,21 @@ namespace pfm
 
         is_init = true;
         return true;
+    }
+
+    void ParamFieldMapper::hook_memcpy() {
+        mem::pattern memcpy_aob { "4c 8b d9 4c 8b d2 49 83 f8 10 0f 86 ?? ?? ?? ?? 49 83 f8 20" };
+
+        auto memcpy_addr = mem::scan(memcpy_aob, utils::main_module_section<".text">()).as<uint8_t*>();
+        if (!memcpy_addr) {
+            Panic("Failed to find memcpy function");
+        }
+
+        auto& arena = hook_arena_pool.get_or_create_arena(memcpy_addr);
+        auto jmp_hook_info = arena.gen_jmp_hook(memcpy_addr, (void*)&memcpy_hook_thunk);
+        orig_memcpy = (decltype(orig_memcpy))jmp_hook_info.trampoline;
+
+        SPDLOG_INFO("Hooked memcpy at {:x}", (intptr_t)memcpy_addr);
     }
 
     void ParamFieldMapper::remap_param_file(ParamFileCap& file_cap) {
@@ -200,19 +233,26 @@ namespace pfm
         else if (ecode != EXCEPTION_ACCESS_VIOLATION)
             return EXCEPTION_CONTINUE_SEARCH;
 
-        // In hot multithreaded code, a second thread might hit the instruction before patches are observed.
-        // To avoid patching twice, we keep track of existing patches
+        // Sanity check to make sure an access violation doesn't occur in a previously patched instruction
         if (patches.contains(code_address)) {
             SPDLOG_DEBUG("Previously patched instruction at {:x}", code_address);
             _getch();
             return EXCEPTION_CONTINUE_EXECUTION;
         }
 
+        // In hot multithreaded code, a second thread might hit the instruction before patches are observed.
+        // To avoid patching twice, we keep track of existing patches
+        auto rip_fix = patch_map.find(code_address);
+        if (rip_fix != patch_map.end()) {
+            SPDLOG_DEBUG("Thread {:x} was waiting at previously patched code location {:x}, redirecting to {:x}",
+                GetCurrentThreadId(), code_address, rip_fix->second);
+            ctx->Rip = rip_fix->second;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
         auto remap_it = remaps.upper_bound(accessed_addr);
         if (remap_it == remaps.end() || accessed_addr < (intptr_t)remap_it->second.noaccess_mem_start) {
-            SPDLOG_TRACE("Access violation outside of noaccess param memory at {:x}", code_address);
-            suspend_threads();
-            _getch();
+            SPDLOG_CRITICAL("Access violation outside of noaccess param memory at {:x}", code_address);
             return EXCEPTION_CONTINUE_SEARCH; 
         }
         auto& remapped_file = remap_it->second;
@@ -261,8 +301,17 @@ namespace pfm
             spdlog::to_hex((uint8_t*)code_address, (uint8_t*)code_address + instruction.length),
             spdlog::to_hex(patched_code, patched_code + patched_code_size));
 
-        // In this case, we have to check for jmp targets inside the relocation window
-        if (instruction.length < 5 && patched_code_size != instruction.length) {
+        // If we can, simply patch the instruction in-place
+        // if (patched_code_size == instruction.length) {
+        //     std::memcpy((void*)code_address, patched_code, patched_code_size);
+        //     patches.insert(code_address);
+        //     return EXCEPTION_CONTINUE_EXECUTION;
+        // }
+
+        // Otherwise, create a trampoline
+
+        // Check for jmp targets inside the relocation window. If present, must perform CFG analysis
+        if (instruction.length < 5) {
             auto jmp_point = std::upper_bound(jmp_targets_heuristic.begin(), jmp_targets_heuristic.end(), code_address);
             if (jmp_point != jmp_targets_heuristic.end()
                 && *jmp_point >= code_address + instruction.length  // Confirmed false positive
@@ -270,16 +319,17 @@ namespace pfm
             {
                 SPDLOG_WARN("relocating at {:x} may lead to a mid-instruction jmp", code_address);
 
-                auto node = flow_graph.node_at(code_address);
-                if (!node) {
+                if (!flow_graph.visited_instruction(code_address)) {
                     auto fun_begin = cfg_utils::find_function(code_address, ctx->Rsp);
-                    if (!fun_begin) {
-                        Panic("Failed to find function start for instruction at {:x}", code_address);
+                    if (fun_begin) {
+                        SPDLOG_DEBUG("Found function begin {:x} for instruction at {:x}", fun_begin, code_address);
                     }
-                    if (!flow_graph.walk_function(fun_begin)) {
+                    else Panic("Failed to find function start for instruction at {:x}", code_address);
+                
+                    if (!flow_graph.walk(fun_begin)) {
                         Panic("Failed to compute control flow graph for instruction at at {:x}", code_address);
                     }
-                    if ((node = flow_graph.node_at(code_address))) {
+                    if (flow_graph.visited_instruction(code_address)) {
                         SPDLOG_INFO("Success of flow analysis back to original instruction at {:x}", code_address);
                     }
                     else {
@@ -289,22 +339,30 @@ namespace pfm
             }
         }
 
-        // If we can, simply patch the instruction in-place
-        if (patched_code_size == instruction.length) {
-            utils::patch_memory({ (uint8_t*)code_address, patched_code_size }, [&]() {
-                std::memcpy((void*)code_address, patched_code, patched_code_size);
-            });
-            patches.insert(code_address);
-        }
-        // Otherwise, create a trampoline
-        else {
-            auto& hook_arena = hook_arena_pool.get_or_create_arena((void*)code_address);
-            auto hook_start = (intptr_t)hook_arena.ptr();
-            hook_arena.write(patched_code, patched_code + patched_code_size);
-            hook_arena.gen_trampoline(hook_start, code_address, 1);
-            patches.insert(hook_start);
-        }
+        auto& hook_arena = hook_arena_pool.get_or_create_arena((void*)code_address);
 
+        uint8_t original_code[ZYDIS_MAX_INSTRUCTION_LENGTH];
+        std::memcpy(original_code, (uint8_t*)code_address, instruction.length);
+
+        intptr_t final_patch_address = 0; 
+        auto gen_patch = [&]{ 
+            final_patch_address = (intptr_t)hook_arena.ptr();
+            hook_arena.gen_cond_access_hook(original_code, patched_code,
+                (uintptr_t)remap_arena.buffer().data(), 
+                (uintptr_t)remap_arena.buffer().data() + remap_arena.buffer().size());
+        };
+
+        /// Update flow graph while building trampoline if required
+        auto cfg = flow_graph.visited_instruction(code_address) ? &flow_graph : nullptr;
+        auto result = trampoline::gen_trampoline(hook_arena, gen_patch, (uint8_t*)code_address, true, cfg);
+        if (!result) {
+            Panic("Trampoline generation at {:x} failed", code_address);
+        }
+        
+        ctx->Rip = final_patch_address;
+        patch_map[code_address] = final_patch_address;
+        patches.insert(final_patch_address);
+        
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 }

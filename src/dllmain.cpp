@@ -1,4 +1,5 @@
 #include "param_field_mapper.h"
+#include "spdlog/common.h"
 #include "spdlog/sinks/wincolor_sink.h"
 #include "spdlog/spdlog.h"
 #include <Windows.h>
@@ -37,10 +38,16 @@ void create_console() {
 
 DWORD main_thread(HMODULE module) {
 	create_console();	
+
+	std::unordered_map<int, char> cont{{1, 'a'}, {2, 'b'}, {3, 'c'}};
+    // Extract node handle and change key
+    auto nh = cont.extract(1);
+    nh.key() = 4;
 	
   	std::locale::global(std::locale("en_us.UTF-8"));
 	set_pattern("[%T.%e] %^[%l]%$ [%s] %v");
 	set_level(level::level_enum::trace);
+	flush_on(level::level_enum::err);
 
 	auto console_sink = spdlog::create<spdlog::sinks::wincolor_stdout_sink_mt>("default");
 	set_default_logger(console_sink);
