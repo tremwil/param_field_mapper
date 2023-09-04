@@ -51,7 +51,7 @@ namespace pfm
         }
         SPDLOG_INFO("Done, found {:L} potential targets", jmp_targets_heuristic.size());
 
-        SPDLOG_INFO("Computing program-wide CFG...");
+        SPDLOG_INFO("Computing program-wide CFG. Dissassembly errors expected!");
         uint8_t* module_base = (uint8_t*)GetModuleHandle(NULL);
         auto ex_tbl = cfg_utils::get_exception_table(module_base);
         for (const auto& rf: ex_tbl) {
@@ -74,7 +74,7 @@ namespace pfm
         // TODO: HOOK SOMETHING INSTEAD PLEASE
         Sleep(500);
 
-        SPDLOG_INFO("Params loaded");
+        SPDLOG_INFO("Params loaded, remapping...");
 
         alloc_param_remap_mem(param_repo);
         hook_memcpy();
@@ -105,7 +105,8 @@ namespace pfm
             remap_param_file(file_cap);
         }
 
-        SPDLOG_DEBUG("Final remap memory = {:L} bytes", committed_remap_mem);
+        SPDLOG_INFO("Done, remapped {} params", remaps.size());
+        SPDLOG_INFO("Final comitted param memory after decommits: {:L} bytes", committed_remap_mem);
 
         def_dump_timer.interval() = 10000;
         def_dump_timer.start([this] { dump_defs(); });
@@ -149,12 +150,10 @@ namespace pfm
 
         shift = 0;
         size_t num_params = 0;
-        size_t normal_param_mem = 0; // Just for stats
         size_t no_shift_req_mem = 0; // Total required memory outside of shift between trap and true param files
     
         for (auto& file_cap : param_repo->param_container) {
             num_params++;
-            normal_param_mem += file_cap.param_file_size;
             auto file = file_cap.param_file;
             shift = std::max(shift, file_cap.param_file_size +  sysinfo.dwPageSize);
             no_shift_req_mem += 
@@ -167,8 +166,7 @@ namespace pfm
         shift = utils::align_up(shift, 16); // Force 16-byte alignment to shift, to avoid unaligned access
         committed_remap_mem = no_shift_req_mem + shift * num_params;
 
-        SPDLOG_DEBUG("Required file shift = {}, memory = {:L} bytes ({:.1f}x increase)", 
-            shift, committed_remap_mem, (double)committed_remap_mem / normal_param_mem);
+        SPDLOG_INFO("Required param file shift is {} => must reserve {:L} byte block", shift, committed_remap_mem);
         
         auto alloc_base = (uint8_t*)VirtualAlloc(NULL, committed_remap_mem, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         if (!alloc_base) {
@@ -220,7 +218,7 @@ namespace pfm
         auto unused_pages_start = utils::align_up(remap_arena.ptr(), sysinfo.dwPageSize);
         remap_arena.advance(shift - file_bytes.size());
 
-        // Save on memory by decommitting unused pages until proper shift offset
+        // Save on comitted memory by decommitting unused pages until proper shift offset
         auto unused_pages_end = utils::align_down(remap_arena.ptr(), sysinfo.dwPageSize);
         if (unused_pages_end > unused_pages_start) {
             VirtualFree(unused_pages_start, unused_pages_end - unused_pages_start, MEM_DECOMMIT);
@@ -312,7 +310,7 @@ namespace pfm
             Panic("Param-accessing instruction at {:x} has no memory operand!?!?!", code_addr);
         }
 
-        SPDLOG_TRACE("{:x} accessed offset 0x{:x} in param {} (access width {})", 
+        SPDLOG_TRACE("{:x} accessed offset 0x{:x} in {} (access width {})", 
                 code_addr, ofs, remapped_file.param_name, mem_op->size);
 
         // Ignore unaligned or >64 bit operations
@@ -326,7 +324,7 @@ namespace pfm
             return;
         }
         if (ofs % (mem_op->element_size / 8)) {
-            SPDLOG_WARN("Misaligned access in param {} at {:x} (ofs 0x{:x}, align {})", 
+            SPDLOG_WARN("Misaligned access in {} at {:x} (ofs 0x{:x}, align {})", 
                 remapped_file.param_name, code_addr, ofs, mem_op->element_size / 8);
         }
 
@@ -385,7 +383,7 @@ namespace pfm
                 code_addr, def.param_name, field.as_fs_type_name(), ofs, conflict_field_name, conflict_ofs);
         }
         else {
-            SPDLOG_DEBUG("{:x} {} {} at offset 0x{:x} in param {}", 
+            SPDLOG_DEBUG("{:x} {} {: <3} at offset 0x{:03x} in {}", 
                 code_addr, is_new ? "deduced" : "upholds", 
                 field.as_fs_type_name(), ofs, remapped_file.param_name);
         }

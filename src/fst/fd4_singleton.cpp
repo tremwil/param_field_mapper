@@ -88,8 +88,8 @@ namespace pfm
                     SPDLOG_TRACE("{} -> {:x}", no_namespace_name, static_addr.as<uintptr_t>());
                     singleton_addresses[no_namespace_name] = static_addr.as<void**>();
                 }
-                else if (prv_entry->second != static_addr.as<void**>()) { // FD4DebugMenuManager has 2 addresses for some reason
-                    SPDLOG_DEBUG("Address mismatch for singleton {} : {:p} vs {:p}",
+                else if (prv_entry->second != static_addr.as<void**>()) {
+                    SPDLOG_WARN("Address mismatch for singleton {} : {:p} vs {:p}",
                         no_namespace_name, (void*)prv_entry->second, static_addr.as<void*>());
                 }
             }
