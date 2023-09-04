@@ -20,9 +20,9 @@ will be overwritten when you re-inject it!** You will have to copy the defs out 
 folder after a gaming session, and merge them with existing ones using your own code.
 
 # Roadmap (may do, may not)
-[ ] Add basic config file
-[ ] Support loading existing defs as a base
-[ ] Support logging accesses to specific params or offsets for RE purposes
+- [ ] Add basic config file
+- [ ] Support loading existing defs as a base
+- [ ] Support logging accesses to specific params or offsets for RE purposes
 
 # Bugs
 Self-modifying code on this scale is hard, and you may encounter a crash or panic
