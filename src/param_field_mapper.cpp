@@ -23,6 +23,7 @@
 #include <winnt.h>
 #include <winternl.h>
 
+// For debugging purposes
 void suspend_threads()
 {
     typedef NTSTATUS(*NtGetNextThread_t)(HANDLE ProcessHandle, HANDLE ThreadHandle, ACCESS_MASK DesiredAccess, ULONG HandleAttributes,
@@ -41,9 +42,9 @@ void suspend_threads()
 
 namespace pfm
 {
-    void ParamFieldMapper::do_code_analysis() {
+    void ParamFieldMapper::init() {
         std::lock_guard lock(mutex);
-        if (code_analysis_done) return;
+        if (initialized) return;
 
         SPDLOG_INFO("Finding potential JMP targets...");
         if (!instr_utils::jmp_targets_heuristic(nullptr, jmp_targets_heuristic)) {
@@ -61,20 +62,17 @@ namespace pfm
         }
         SPDLOG_INFO("Done, walked {} functions in exception table", ex_tbl.size());
 
-        code_analysis_done = true;
+        hook_solo_param_lookup();
+        SPDLOG_INFO("Waiting for params to be loaded...");
+
+        initialized = true;
     }
 
     void ParamFieldMapper::do_param_remaps() {
         std::lock_guard lock(mutex);
         if (remaps_done) return;
 
-        SPDLOG_INFO("Waiting for params...");
-        SoloParamRepository::wait_until_loaded();
-        auto param_repo = FD4ParamRepository::wait_for_instance();
-        // TODO: HOOK SOMETHING INSTEAD PLEASE
-        Sleep(500);
-
-        SPDLOG_INFO("Params loaded, remapping...");
+        auto param_repo = FD4ParamRepository::instance();
 
         alloc_param_remap_mem(param_repo);
         hook_memcpy();
@@ -127,6 +125,35 @@ namespace pfm
         }
 
         SPDLOG_INFO("Dumped {} paramdefs to disk", defs_copy.size());
+    }
+
+    void ParamFieldMapper::hook_solo_param_lookup() {
+        mem::pattern lookup_aob { "81 fa 07 01 00 00 7d ?? 48 63 d2 48 8d 04 d2" };
+        
+        auto lookup_addr = mem::scan(lookup_aob, utils::main_module_section<".text">()).as<uint8_t*>();
+        if (!lookup_addr) {
+            Panic("Failed to find memcpy function");
+        }
+
+        auto& arena = hook_arena_pool.get_or_create_arena(lookup_addr);
+        auto jmp_hook_info = arena.gen_jmp_hook(lookup_addr, (void*)&solo_param_hook_thunk);
+        orig_param_lookup = (decltype(orig_param_lookup))jmp_hook_info.trampoline;
+
+        SPDLOG_INFO("Hooked SoloParamRepository lookup at {:x}", (intptr_t)orig_param_lookup);
+    }
+
+    void* ParamFieldMapper::solo_param_hook(SoloParamRepository* solo_param, uint32_t bucket, uint32_t index_in_bucket) {
+        if (!remaps_done) {
+            auto params = FD4ParamRepository::instance()->param_container;
+
+            // TODO: Incremental remapping or cross-checking with regulation on disk
+            // instead of hardcoding param count
+            size_t num_params = std::distance(params.begin(), params.end());
+            if (num_params >= 271) {
+                do_param_remaps();   
+            }
+        }
+        return orig_param_lookup(solo_param, bucket, index_in_bucket);
     }
 
     void ParamFieldMapper::hook_memcpy() {

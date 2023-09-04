@@ -43,15 +43,14 @@ namespace pfm
     class ParamFieldMapper : public Singleton<ParamFieldMapper> 
     {
     public:
-        void do_code_analysis();
-        void do_param_remaps();
+        void init();
 
     protected: 
         ParamFieldMapper() = default;
 
     private:
         std::mutex mutex;
-        bool code_analysis_done = false;
+        bool initialized = false;
         bool remaps_done = false;
 
         std::unordered_set<intptr_t> patches;
@@ -77,8 +76,15 @@ namespace pfm
         Timer def_dump_timer;
 
         uint8_t* (*orig_memcpy)(uint8_t*, uint8_t*, size_t); 
+        void* (*orig_param_lookup)(SoloParamRepository*, uint32_t, uint32_t);
+
+        void do_param_remaps();
 
         void dump_defs();
+
+        void hook_solo_param_lookup();
+
+        void* solo_param_hook(SoloParamRepository* solo_param, uint32_t bucket, uint32_t index_in_bucket);
 
         void hook_memcpy();
 
@@ -92,10 +98,6 @@ namespace pfm
 
         LONG veh(EXCEPTION_POINTERS* ex);
 
-        static LONG veh_thunk(EXCEPTION_POINTERS* ex) {
-            return ParamFieldMapper::get().veh(ex);
-        }
-
         uint8_t* memcpy_hook(uint8_t* dest, uint8_t* src, size_t size) {
             const uint8_t* remap_begin = remap_arena.buffer().data();
             const uint8_t* remap_end = remap_begin + remap_arena.buffer().size();
@@ -105,8 +107,16 @@ namespace pfm
             else return orig_memcpy(dest, src, size);
         }
 
+        static LONG veh_thunk(EXCEPTION_POINTERS* ex) {
+            return ParamFieldMapper::get().veh(ex);
+        }
+
         static uint8_t* memcpy_hook_thunk(uint8_t* dest, uint8_t* src, size_t size) {
             return get().memcpy_hook(dest, src, size);
+        }
+
+        static void* solo_param_hook_thunk(SoloParamRepository* solo_param, uint32_t bucket, uint32_t index_in_bucket) {
+            return get().solo_param_hook(solo_param, bucket, index_in_bucket);
         }
     };
 }

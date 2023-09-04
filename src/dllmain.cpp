@@ -132,16 +132,7 @@ void bootstrap(bool is_entry_hook) {
 	}
 
     arxan_disabler::disable_code_restoration();
-
-	ParamFieldMapper::get().do_code_analysis();
-
-	std::thread param_remap_thread([is_entry_hook] {
-		// We need to wait until DLRuntimeClass data is initialized if running before the entry point
-		// TODO: Find a good hook point for this.
-		if (is_entry_hook) std::this_thread::sleep_for(100ms);
-		ParamFieldMapper::get().do_param_remaps();
-	});
-	param_remap_thread.detach();
+	ParamFieldMapper::get().init();
 }
 
 static uintptr_t(*ORIGINAL_ENTRY_POINT)();
