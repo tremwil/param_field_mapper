@@ -92,8 +92,9 @@ Note that there are a few complications to this approac:
 - [Chainfailure](https://github.com/vswarte) for FD4 resource repository struct layouts
 
 ## Libraries Used
-- HDE (MinHook's) dissassembler, by Vyacheslav Patkov
-- [Zydis](https://github.com/zyantific/zydis)
-- [mem](https://github.com/0x1F9F1/mem)
-- [spdlog](https://github.com/gabime/spdlog)
-- [pugixml](https://github.com/zeux/pugixml)
+- HDE (MinHook's) dissassembler, by Vyacheslav Patkov. Quick and dirty, but fast!
+- [Zydis](https://github.com/zyantific/zydis) for information-rich dissassembly
+- [mem](https://github.com/0x1F9F1/mem) for RE QoL and its blazing-fast AVX2 pattern scanner
+- [spdlog](https://github.com/gabime/spdlog) for logging
+- [pugixml](https://github.com/zeux/pugixml) for XML serialization
+- [ValveFileVDF](https://github.com/TinyTinni/ValveFileVDF) to find the game's install path
