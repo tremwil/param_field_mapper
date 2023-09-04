@@ -1,7 +1,10 @@
 #pragma once
 #include <spdlog/spdlog.h>
 #include <spdlog/fmt/fmt.h>
-#include <Windows.h>
+
+#include <winuser.h>
+#include <processthreadsapi.h>
+
 
 #define Panic(FMT, ...) \
 	pfm::panic(spdlog::source_loc{__FILE__, __LINE__, SPDLOG_FUNCTION}, fmt::format(FMT, __VA_ARGS__))

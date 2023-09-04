@@ -5,6 +5,8 @@ project(
     LANGUAGES CXX C
 )
 
+set(CMAKE_CXX_STANDARD 20)
+
 set(OUT_DIR ${CMAKE_SOURCE_DIR}/bin/${CMAKE_BUILD_TYPE}/)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${OUT_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${OUT_DIR})
@@ -42,4 +44,5 @@ target_compile_features(param_field_mapper PRIVATE cxx_std_20)
 # Disable min/max macros to not override std::min and std::max, and _CRT_SECURE_NO_WARNINGS and __cpp_consteval (to fix source_location)
 target_compile_definitions(param_field_mapper PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS __cpp_consteval)
 
+add_subdirectory(launcher)
 add_subdirectory(dependencies)

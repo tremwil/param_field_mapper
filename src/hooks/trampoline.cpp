@@ -60,7 +60,7 @@ namespace pfm::trampoline
             }
             // RIP-relative MODRM instruction
             else if ((disasm.flags & F_MODRM) && disasm.modrm_mod == 0 && disasm.modrm_rm == 0b101) {
-                r.tgt = r.instr_end + disasm.disp.disp32 + ip_ofs;
+                r.tgt = instr + disasm.len + (int32_t)disasm.disp.disp32 + ip_ofs;
                 r.imm_size = 4;
                 relocs.push_back(r);
             }

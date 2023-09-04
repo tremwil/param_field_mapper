@@ -1,13 +1,88 @@
 #include "param_field_mapper.h"
+#include "arxan_disabler.h"
+
 #include "spdlog/common.h"
 #include "spdlog/sinks/wincolor_sink.h"
 #include "spdlog/spdlog.h"
+
 #include <Windows.h>
+#include <errhandlingapi.h>
+#include <handleapi.h>
 #include <stdio.h>
+#include <winnt.h>
+#include <winternl.h>
+
 #include <iostream>
 
 using namespace pfm;
 using namespace spdlog;
+using namespace std::chrono_literals;
+
+typedef NTSTATUS (NTAPI *pNtGetNextThread)(
+         HANDLE ProcessHandle,
+         HANDLE ThreadHandle,
+         ACCESS_MASK DesiredAccess,
+         ULONG HandleAttributes,
+         ULONG Flags,
+         PHANDLE NewThreadHandle
+);
+
+typedef NTSTATUS (NTAPI *pNtQueryInformationThread)(
+        IN HANDLE ThreadHandle,
+        IN DWORD ThreadInformationClass,
+        OUT PVOID ThreadInformation,
+        IN ULONG ThreadInformationLength,
+        OUT PULONG ReturnLength OPTIONAL
+);
+
+#define ThreadQuerySetWin32StartAddress 9
+
+BOOL hijack_suspended_main_thread(void* hook, uintptr_t (**original_entry_point)())
+{
+    HMODULE exe_base = GetModuleHandle(nullptr);
+    auto* dos = (IMAGE_DOS_HEADER*)exe_base;
+    auto* nt = (IMAGE_NT_HEADERS64*)((uintptr_t)exe_base + dos->e_lfanew);
+    uintptr_t proc_entry_point = (uintptr_t)exe_base + nt->OptionalHeader.AddressOfEntryPoint;
+
+    if (original_entry_point)
+        *original_entry_point = (uintptr_t(*)())proc_entry_point;
+
+    auto ntdll = GetModuleHandleA("ntdll.dll");
+    auto NtGetNextThread = (pNtGetNextThread)GetProcAddress(ntdll, "NtGetNextThread");
+    auto NtQueryInformationThread = (pNtQueryInformationThread)GetProcAddress(ntdll, "NtQueryInformationThread");
+
+    HANDLE hproc = GetCurrentProcess(), hthread = nullptr;
+    while (NT_SUCCESS(NtGetNextThread(hproc, hthread, THREAD_ALL_ACCESS, 0, 0, &hthread))) {
+        uintptr_t thread_entry_point = 0;
+        if (NT_SUCCESS(NtQueryInformationThread(hthread, ThreadQuerySetWin32StartAddress, &thread_entry_point, sizeof(thread_entry_point), nullptr)) &&
+            thread_entry_point == proc_entry_point) {
+
+            CONTEXT ctx{};
+            ctx.ContextFlags = CONTEXT_FULL;
+
+            if (!GetThreadContext(hthread, &ctx))
+                return FALSE;
+
+#ifdef _X86_
+            uintptr_t ins_ptr = ctx.Eip;
+#else
+            uintptr_t ins_ptr = ctx.Rip;
+#endif
+            // Make sure the process was created suspended (thread still on RtlUserThreadStart)
+            if (ins_ptr != (DWORD64)GetProcAddress(ntdll, "RtlUserThreadStart"))
+                return FALSE;
+
+#ifdef _X86_
+            // __stdcall convention
+            *(uintptr_t*)(ctx.Esp + 4) = (uintptr_t)hook;
+#else
+            ctx.Rcx = (uintptr_t)hook;
+#endif
+            return SetThreadContext(hthread, &ctx);
+        }
+    }
+    return FALSE;
+}
 
 void create_console() {
 	if (!GetConsoleWindow() && !AllocConsole()) {
@@ -36,32 +111,60 @@ void create_console() {
 	std::wcin.clear();
 }
 
-DWORD main_thread(HMODULE module) {
-	create_console();	
-
-	std::unordered_map<int, char> cont{{1, 'a'}, {2, 'b'}, {3, 'c'}};
-    // Extract node handle and change key
-    auto nh = cont.extract(1);
-    nh.key() = 4;
+void bootstrap(bool is_entry_hook) {
+	create_console();
 	
   	std::locale::global(std::locale("en_us.UTF-8"));
 	set_pattern("[%T.%e] %^[%l]%$ [%s] %v");
-	set_level(level::level_enum::trace);
+	set_level(level::level_enum::debug);
 	flush_on(level::level_enum::err);
 
-	auto console_sink = spdlog::create<spdlog::sinks::wincolor_stdout_sink_mt>("default");
-	set_default_logger(console_sink);
+	if (!is_entry_hook) {
+		SPDLOG_WARN("DLL was injected without launcher. Arxan has already run; code analysis coverage will not be as good!");
+	}
+	else {
+		// Since we're entry hooking, Arxan hasn't set the game's memory to RWE yet. Do it now
+		auto main_module = mem::module::main();
+		DWORD old_protect;
+		if (!VirtualProtect(main_module.start.as<void*>(), main_module.size, PAGE_EXECUTE_READWRITE, &old_protect)) {
+			Panic("Failed to change memory protection of game code (error {:08X})", GetLastError());
+		}
+	}
 
-	ParamFieldMapper::get().init();
+    arxan_disabler::disable_code_restoration();
+
+	ParamFieldMapper::get().do_code_analysis();
+
+	std::thread param_remap_thread([is_entry_hook] {
+		// We need to wait until DLRuntimeClass data is initialized if running before the entry point
+		// TODO: Find a good hook point for this.
+		if (is_entry_hook) std::this_thread::sleep_for(100ms);
+		ParamFieldMapper::get().do_param_remaps();
+	});
+	param_remap_thread.detach();
+}
+
+static uintptr_t(*ORIGINAL_ENTRY_POINT)();
+uintptr_t __stdcall hooked_entry_point() {
+	bootstrap(true);
+	return ORIGINAL_ENTRY_POINT();
+}
+
+DWORD __stdcall thread_entry_point(LPVOID lParam) {
+	bootstrap(false);
 	return 0;
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD call_reason, LPVOID reserved) {
 	DisableThreadLibraryCalls(module);
-	if (call_reason == DLL_PROCESS_ATTACH) {
-		auto handle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)main_thread, module, 0, NULL);
-		if (handle == INVALID_HANDLE_VALUE)
-			printf("Failed to create DLL thread (error = %lu)\n", GetLastError());
-	};
-	return TRUE;
+	if (call_reason != DLL_PROCESS_ATTACH) { 
+		return TRUE;
+	}
+	if (hijack_suspended_main_thread((void*)hooked_entry_point, &ORIGINAL_ENTRY_POINT)) {
+		return TRUE;
+	}
+	else {
+		auto handle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)thread_entry_point, module, 0, NULL);
+		return handle != INVALID_HANDLE_VALUE;
+	}
 };

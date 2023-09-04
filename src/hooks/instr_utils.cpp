@@ -1,4 +1,5 @@
 #include "instr_utils.h"
+#include "hde/hde64.h"
 #include "hooks/instr_utils.h"
 #include <winnt.h>
 
@@ -29,6 +30,20 @@ namespace pfm::instr_utils
 		return true;
 	}
 
+	int32_t get_disp(uint8_t* instr) 
+	{
+		hde64s disasm;
+		hde64_disasm(instr, &disasm);
+
+		if (!(disasm.flags & F_MODRM))
+			return 0;
+
+		if (disasm.flags & F_DISP8) return (int8_t)disasm.disp.disp8;
+		if (disasm.flags & F_DISP16) return (int16_t)disasm.disp.disp16;
+		if (disasm.flags & F_DISP32) return (int16_t)disasm.disp.disp32;
+		else return 0;
+	}
+
 	size_t gen_new_disp(uint8_t* instr_out, uint8_t* instr, int32_t new_disp)
 	{
 		hde64s disasm;
@@ -39,9 +54,9 @@ namespace pfm::instr_utils
 
 		int32_t imm_size = 0;
 		if (disasm.flags & F_IMM8) imm_size = 1;
-		if (disasm.flags & F_IMM16) imm_size = 2;
-		if (disasm.flags & F_IMM32) imm_size = 4;
-		if (disasm.flags & F_IMM64) imm_size = 8;
+		else if (disasm.flags & F_IMM16) imm_size = 2;
+		else if (disasm.flags & F_IMM32) imm_size = 4;
+		else if (disasm.flags & F_IMM64) return 0; // Not supported
 
 		int32_t imm_offset = disasm.len - imm_size;
 		int32_t disp_offset = imm_offset;

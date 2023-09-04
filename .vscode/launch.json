@@ -1,0 +1,25 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch (release with debug info)",
+            "type": "cppdbg",
+            "request": "launch",
+            "cwd": "${workspaceRoot}/bin/RelWithDebInfo/",
+            "program": "${workspaceRoot}/bin/RelWithDebInfo/launcher.exe",
+            "externalConsole": true,
+            "preLaunchTask": "CMake: build"
+        }, {
+            "name": "Launch (release)",
+            "type": "cppdbg",
+            "request": "launch",
+            "cwd": "${workspaceRoot}/bin/Release/",
+            "program": "${workspaceRoot}/bin/Release/launcher.exe",
+            "externalConsole": true,
+            "preLaunchTask": "CMake: build"
+        },
+    ]
+}
