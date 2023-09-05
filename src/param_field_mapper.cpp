@@ -18,6 +18,7 @@
 #include <conio.h>
 #include <excpt.h>
 #include <filesystem>
+#include <fstream>
 #include <spdlog/fmt/bin_to_hex.h>
 
 #include <winnt.h>
@@ -42,9 +43,11 @@ void suspend_threads()
 
 namespace pfm
 {
-    void ParamFieldMapper::init() {
+    void ParamFieldMapper::init(const PFMConfig& config) {
         std::lock_guard lock(mutex);
         if (initialized) return;
+
+        this->config = config;
 
         SPDLOG_INFO("Finding potential JMP targets...");
         if (!instr_utils::jmp_targets_heuristic(nullptr, jmp_targets_heuristic)) {
@@ -62,6 +65,10 @@ namespace pfm
         }
         SPDLOG_INFO("Done, walked {} functions in exception table", ex_tbl.size());
 
+        if (config.load_existing_defs) {
+            load_existing_defs();
+        }
+
         hook_solo_param_lookup();
         SPDLOG_INFO("Waiting for params to be loaded...");
 
@@ -70,34 +77,41 @@ namespace pfm
 
     void ParamFieldMapper::do_param_remaps() {
         std::lock_guard lock(mutex);
+        std::lock_guard defs_lock(def_copy_mutex);
         if (remaps_done) return;
 
         auto param_repo = FD4ParamRepository::instance();
 
         alloc_param_remap_mem(param_repo);
+        
+        AddVectoredExceptionHandler(TRUE, &ParamFieldMapper::veh_thunk);
         hook_memcpy();
 
-        AddVectoredExceptionHandler(TRUE, &ParamFieldMapper::veh_thunk);
         for (auto& file_cap: param_repo->param_container) {
-            // Init def
-            ParamdefTypemap def {
-                .param_name = utils::wide_string_to_string(file_cap.resource_name),
-                .data_version = file_cap.param_file->paramdef_data_version,
-                .big_endian = file_cap.param_file->is_big_endian,
-                .unicode = file_cap.param_file->is_unicode()
-            };
-            if (auto rs = file_cap.param_file->row_size()) {
-                def.row_size = *rs;
+            auto param_name = utils::wide_string_to_string(file_cap.resource_name);
+            auto rs = file_cap.param_file->row_size();
+            if (!rs.has_value()) {
+                Panic("Failed to deduce row size of param {}", param_name);
             }
-            else {
-                Panic("Failed to deduce row size of param {}", def.param_name);
+            auto [it, inserted] = defs.insert(std::make_pair(param_name, ParamdefTypemap {
+                .param_name = param_name
+            }));
+            auto& def = it->second;
+            if (!inserted && def.row_size != *rs) {
+                Panic("Row size of existing def for {} ({}) does not match computed value ({})",
+                    param_name, def.row_size, *rs);
             }
+
+            def.data_version = file_cap.param_file->paramdef_data_version;
+            def.big_endian = file_cap.param_file->is_big_endian;
+            def.unicode = file_cap.param_file->is_unicode();
+            def.row_size = *rs;
+
             std::string_view param_type { file_cap.param_file->param_type() };
-            if (std::all_of(param_type.begin(), param_type.end(), [](auto c) { return c < '!' || c > 'z'; })) {
+            if (!def.param_type.has_value() && !param_type.empty() &&
+                !std::any_of(param_type.begin(), param_type.end(), [](auto c) { return c < '!' || c > 'z'; })) 
+            {
                 def.param_type = param_type;
-            }
-            if (!defs.emplace(std::make_pair(def.param_name, def)).second) {
-                Panic("Param {} visited twice", def.param_name);
             }
 
             remap_param_file(file_cap);
@@ -106,14 +120,38 @@ namespace pfm
         SPDLOG_INFO("Done, remapped {} params", remaps.size());
         SPDLOG_INFO("Final comitted param memory after decommits: {:L} bytes", committed_remap_mem);
 
-        def_dump_timer.interval() = 10000;
+        def_dump_timer.interval() = config.dump_frequency_ms;
         def_dump_timer.start([this] { dump_defs(); });
         remaps_done = true;
+    }
+
+    void ParamFieldMapper::load_existing_defs() {
+        std::lock_guard lock(def_copy_mutex);
+        
+        SPDLOG_INFO("Loading existing paramdefs...");
+
+        auto dump_path = utils::dll_folder() / "paramdefs";
+        fs::create_directory(dump_path);
+
+        size_t num_loaded = 0;
+        for (const auto& f : fs::directory_iterator(dump_path)) {
+            if (!f.is_regular_file() || f.path().extension() != ".xml") {
+                SPDLOG_WARN("{} is not an XML paramdef, skipping", f.path().string());
+                continue;
+            }
+            if (auto def = ParamdefTypemap::from_xml(f.path().string(), config.def_parse_options)) {
+                defs[def->param_name] = std::move(*def);
+                num_loaded++;
+                SPDLOG_TRACE("Loaded paramdef {}", f.path().string());
+            }
+        }
+        SPDLOG_INFO("Loaded {} existing XML paramdefs", num_loaded);
     }
 
     void ParamFieldMapper::dump_defs() {
         def_copy_mutex.lock();
         auto defs_copy = defs;
+        auto accesses_copy = simd_accesses;
         def_copy_mutex.unlock();
 
         auto dump_path = utils::dll_folder() / "paramdefs";
@@ -121,7 +159,16 @@ namespace pfm
 
         for (const auto& [name, def]: defs_copy) {
             auto path = dump_path / (name + ".xml");
-            def.serialize_to_xml(path.string());
+            def.serialize_to_xml(path.string(), config.def_serialize_options);
+        }
+
+        if (config.dump_simd_accesses) {
+            std::ofstream fs;
+            fs.open(utils::dll_folder() / "simd_accesses.csv", std::fstream::trunc);
+            for (const auto& [addr, param, ofs] : accesses_copy) {
+                fs << fmt::format("{:x}, {}, 0x{:03x}", addr, param, ofs) << std::endl;
+            }
+            fs.close();
         }
 
         SPDLOG_INFO("Dumped {} paramdefs to disk", defs_copy.size());
@@ -327,6 +374,13 @@ namespace pfm
             Panic("Zydis failed to decompile instruction at {:x}", code_addr);
         }
 
+        const auto orig_addr_it = to_original_instruction.find(code_addr);
+        const auto orig_addr = (orig_addr_it != to_original_instruction.end()) ? 
+            orig_addr_it->second : code_addr;
+
+        const auto print_addr = config.print_original_addresses ? orig_addr : code_addr;
+        const auto dump_addr = config.dump_original_addresses ? orig_addr : code_addr;
+
         ZydisDecodedOperand* mem_op = nullptr;
         for (int i = 0; i < instruction.operand_count; i++) {
             if (operands[i].type != ZYDIS_OPERAND_TYPE_MEMORY) continue;
@@ -334,7 +388,7 @@ namespace pfm
             break;
         }
         if (mem_op == nullptr) {
-            Panic("Param-accessing instruction at {:x} has no memory operand!?!?!", code_addr);
+            Panic("Param-accessing instruction at {:x} has no memory operand!?!?!", print_addr);
         }
 
         SPDLOG_TRACE("{:x} accessed offset 0x{:x} in {} (access width {})", 
@@ -342,17 +396,21 @@ namespace pfm
 
         // Ignore unaligned or >64 bit operations
         if ((mem_op->element_size & 7) || mem_op->element_size > 64) {
-            SPDLOG_WARN("Unsupported load size for instruction at {:x} ({} bits), ignoring", code_addr, mem_op->size);
+            SPDLOG_WARN("Unsupported load size for instruction at {:x} ({} bits), ignoring", print_addr, mem_op->size);
             return;
         }
         // Ignore operarations with more than one element (SIMD loads)
         if (mem_op->element_count > 1) {
-            SPDLOG_WARN("instruction at {:x} ({} bits) is a SIMD load, ignoring", code_addr, mem_op->size);
+            SPDLOG_WARN("{:x} acessing {} in {} is a SIMD load ({} bits), ignoring", 
+                print_addr, ofs, remapped_file.param_name, mem_op->size);
+            
+            std::lock_guard lock(def_copy_mutex);
+            simd_accesses.push_back(std::tie(dump_addr, remapped_file.param_name, ofs));
             return;
         }
         if (ofs % (mem_op->element_size / 8)) {
             SPDLOG_WARN("Misaligned access in {} at {:x} (ofs 0x{:x}, align {})", 
-                remapped_file.param_name, code_addr, ofs, mem_op->element_size / 8);
+                remapped_file.param_name, print_addr, ofs, mem_op->element_size / 8);
         }
 
         // Register new field defs
@@ -363,7 +421,15 @@ namespace pfm
         const intptr_t elem_addr = access_addr + shift;
         const uint64_t sign_bit = 1ull << (mem_op->element_size - 1);
         const uint64_t raw_value = *(uint64_t*)elem_addr & (2 * sign_bit - 1);
-        DefField field { .size_bytes = (size_t)mem_op->element_size / 8 };
+        DefField field {
+            .type_size_bits = (size_t)mem_op->element_size,
+            .elem_size_bits = (size_t)mem_op->element_size 
+        };
+
+        // Using SIB; this is likely one element of an array type.
+        if (instruction.attributes & ZYDIS_ATTRIB_HAS_SIB) {
+            field.array_size = 1;
+        }
 
         // Deduce field type based on available information
         switch (mem_op->element_type) {
@@ -402,17 +468,27 @@ namespace pfm
         }
 
         // Try to add deduced field to paramdef typemap
-        const auto [conflict, is_new] = def.try_add_field(ofs, field);
-        if (conflict != def.fields.end()) {
-            const auto& conflict_ofs = conflict->first;
-            const auto conflict_field_name = conflict->second.as_fs_type_name();
+        auto [conflict, result] = def.try_add_field(8 * ofs, field);
+        if (result == DefAddFieldResult::ConflictRejected) {
+            const auto conflict_ofs = conflict->first / 8;
+            const auto conflict_field_name = conflict->second.as_struct_field_decl("");
             SPDLOG_WARN("{:x} causes conflict in def for {}: {} at 0x{:x} (new) vs {} at 0x{:x} (old)",
-                code_addr, def.param_name, field.as_fs_type_name(), ofs, conflict_field_name, conflict_ofs);
+            print_addr, def.param_name, field.as_fs_type_name(), ofs, conflict_field_name, conflict_ofs);
         }
         else {
+            auto& accesses = conflict->second.accesses;
+            if (std::find(accesses.begin(), accesses.end(), dump_addr) == accesses.end())
+                accesses.push_back(dump_addr);
+
+            const char* verb = "deduced";
+            if (result == DefAddFieldResult::AlreadyExists) {
+                if (!config.print_upheld_fields) return;
+                verb = "upholds";
+            }
+            else if (result == DefAddFieldResult::ConflictAccepted) verb = "updated";
+            
             SPDLOG_DEBUG("{:x} {} {: <3} at offset 0x{:03x} in {}", 
-                code_addr, is_new ? "deduced" : "upholds", 
-                field.as_fs_type_name(), ofs, remapped_file.param_name);
+                print_addr, verb, field.as_fs_type_name(), ofs, remapped_file.param_name);
         }
     }
 
@@ -516,6 +592,18 @@ namespace pfm
         auto result = trampoline::gen_trampoline(hook_arena, gen_patch, (uint8_t*)code_address, true, cfg);
         if (!result) {
             Panic("Trampoline generation at {:x} failed", code_address);
+        }
+
+        // Compose relocation address map with global map to original instruction 
+        for (const auto& [prv, reloc] : result.address_map) {
+            auto iprv = (intptr_t)prv, ireloc = (intptr_t)reloc;
+            auto it = to_original_instruction.find(iprv);
+            if (it != to_original_instruction.end()) {
+                auto nh = to_original_instruction.extract(it);
+                nh.key() = ireloc;
+                to_original_instruction.insert(std::move(nh));
+            }
+            else to_original_instruction[ireloc] = iprv;
         }
         
         ctx->Rip = final_patch_address;

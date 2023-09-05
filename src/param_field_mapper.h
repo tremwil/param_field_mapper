@@ -40,10 +40,21 @@ namespace pfm
         };
     };
 
+    struct PFMConfig {
+        int dump_frequency_ms = 10000;
+        bool print_original_addresses = false;
+        bool print_upheld_fields = true;
+        bool dump_original_addresses = true;
+        bool load_existing_defs = true;
+        bool dump_simd_accesses = true;
+        ParamdefParsingOptions def_parse_options {};
+        ParamdefSerializeOptions def_serialize_options {};
+    };
+
     class ParamFieldMapper : public Singleton<ParamFieldMapper> 
     {
     public:
-        void init();
+        void init(const PFMConfig& config = {});
 
     protected: 
         ParamFieldMapper() = default;
@@ -53,8 +64,12 @@ namespace pfm
         bool initialized = false;
         bool remaps_done = false;
 
+        PFMConfig config;
+
         std::unordered_set<intptr_t> patches;
         std::unordered_map<intptr_t, intptr_t> patch_map;
+        std::unordered_map<intptr_t, intptr_t> to_original_instruction;
+        std::vector<std::tuple<intptr_t, std::string, size_t>> simd_accesses;
 
         HookArenaPool hook_arena_pool;
         LiteMemStream remap_arena;
@@ -79,6 +94,8 @@ namespace pfm
         void* (*orig_param_lookup)(SoloParamRepository*, uint32_t, uint32_t);
 
         void do_param_remaps();
+
+        void load_existing_defs();
 
         void dump_defs();
 
