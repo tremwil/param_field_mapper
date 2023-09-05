@@ -1,18 +1,23 @@
+#include "core/utils.h"
 #include "param_field_mapper.h"
 #include "arxan_disabler.h"
 
-#include "spdlog/common.h"
-#include "spdlog/sinks/wincolor_sink.h"
+#include "paramdef_typemap.h"
+
 #include "spdlog/spdlog.h"
+#include "spdlog/sinks/basic_file_sink.h"
 
 #include <Windows.h>
 #include <errhandlingapi.h>
+#include <exception>
 #include <handleapi.h>
+#include <stdexcept>
 #include <stdio.h>
 #include <winnt.h>
 #include <winternl.h>
 
 #include <iostream>
+#include <toml11/toml.hpp>
 
 using namespace pfm;
 using namespace spdlog;
@@ -131,8 +136,48 @@ void bootstrap(bool is_entry_hook) {
         }
     }
 
+    PFMConfig config;
+    try {
+        auto config_path = utils::dll_folder() / "config.toml";
+        auto tbl = toml::parse(config_path);
+
+        fs::path log_file_path = toml::find<std::string>(tbl, "log_file", "path");
+        if (!log_file_path.empty() && !log_file_path.is_absolute()) {
+            log_file_path = utils::dll_folder() / log_file_path;
+        }
+        if (!log_file_path.empty()) {
+            auto file_log = create<sinks::basic_file_sink_mt>("file_log", log_file_path.string());
+            file_log->set_level(level::from_str(toml::find<std::string>(tbl, "log_file", "log_level")));
+            file_log->set_pattern("[%T.%e] %^[%l]%$ [%s] %v");
+        }
+
+        default_logger()->set_level(level::from_str(toml::find<std::string>(tbl, "console", "log_level")));
+        config.print_original_addresses = toml::find<bool>(tbl, "console", "print_original_addresses");
+        config.print_upheld_fields = toml::find<bool>(tbl, "console", "print_upheld_fields");
+
+        config.dump_interval_ms = toml::find<uint32_t>(tbl, "dumps", "interval");
+        config.dump_original_addresses = toml::find<bool>(tbl, "dumps", "dump_original_addresses");
+        config.dump_simd_accesses = toml::find<bool>(tbl, "dumps", "dump_simd_accesses");
+
+        auto& def_parse_opts = toml::find(tbl, "defs", "parsing");
+        config.def_parse_options = {
+            .unnamed_field_regex = toml::find<std::string>(def_parse_opts, "unnamed_field_regex"),
+            .untyped_memory_regex = toml::find<std::string>(def_parse_opts, "untyped_memory_regex"),
+            .ignore_comments = toml::find<bool>(def_parse_opts, "ignore_comments"),
+            .ignore_param_types = toml::find<bool>(def_parse_opts, "ignore_param_types")
+        };
+        auto& def_dump_opts = toml::find(tbl, "defs", "serialization");
+        config.def_serialize_options = {
+            .store_accesses = toml::find<bool>(def_dump_opts, "store_accesses"),
+            .store_type_confidence = toml::find<bool>(def_dump_opts, "store_type_confidence")
+        };
+    }
+    catch (std::exception& e) {
+        Panic("Encountered exception {} while parsing config file: {}", typeid(e).name(), e.what());
+    }
+
     arxan_disabler::disable_code_restoration();
-    ParamFieldMapper::get().init();
+    ParamFieldMapper::get().init(config);
 }
 
 static uintptr_t(*ORIGINAL_ENTRY_POINT)();

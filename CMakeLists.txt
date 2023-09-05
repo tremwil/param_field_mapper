@@ -29,6 +29,14 @@ file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
 
 file(GLOB STATIC_LIBS CONFIGURE_DEPENDS "./lib/*.lib")
 
+file(GLOB RESOURCES "resources/*")
+foreach (FILE ${RESOURCES})
+    get_filename_component(FILE_NAME "${FILE}" NAME)
+    if (NOT EXISTS "${OUT_DIR}/${FILE_NAME}") 
+        file(COPY ${FILE} DESTINATION ${OUT_DIR})
+    endif()
+endforeach()
+
 set(CMAKE_SHARED_LIBRARY_PREFIX "")
 add_library(param_field_mapper SHARED "${DEPENDENCIES};${SRC_FILES}")
 

@@ -1,0 +1,48 @@
+[log_file]
+# Log file path. Leaving this blank will only log to the console.
+path = ""
+# File log level. Valid values are "off", "trace", "debug", "info", "warning", "error" and "critical". 
+log_level = "trace"
+
+
+[console]
+# Console log level. Valid values are "off", "trace", "debug", "info", "warning", "error" and "critical". 
+log_level = "debug" 
+# If true, prints the original address of instructions as if the game was unpatched. Otherwise, prints
+# the real memory address of the instruction, which may have been relocated due to previous patches.
+print_original_addresses = true 
+# If true, will still print a message to the console when another instruction accesses a field and deduces the
+# same type as previous ones. You may want to disable this if you only want to see actual field type updates.  
+print_upheld_fields = true
+
+
+[dumps]
+# Interval, in milliseconds, between file dumps.
+interval = 10000
+# If true, will create a CSV file storing param accesses by SIMD instructions which have been ignored 
+# by the field type deductor.
+dump_simd_accesses = true
+# If true, dumps the original address of instructions as if the game was unpatched. Otherwise, dumps
+# the real memory address of the instruction, which may have been relocated due to previous patches.
+dump_original_addresses = true
+
+
+[defs.parsing]
+# Regex used to determine if a field should be considered unknown/unamed and thus
+# susceptible to type overrules via automatic deduction
+unnamed_field_regex = "unk_.*"
+# Regex used to determine if a field should be considered "untyped memory" and thus 
+# ignored 
+untyped_memory_regex = "untyped_.*"
+# If true, will ignore comments (and thus delete them when reserializing) 
+ignore_comments = false
+# If true, will ignore param types (and thus use the ones in param files instead)
+ignore_param_types = false
+
+
+[defs.serialization]
+# If true, acessing instruction addresses will be added to a comment before the field XML node
+store_accesses = true
+# If true, the type confidence value used to handle conflicts internally will be saved as an extra attribute
+# to the field's XML node. Should not be disabled if you want to continue collecting data with the same defs!
+store_type_confidence = true

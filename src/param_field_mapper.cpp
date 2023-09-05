@@ -120,7 +120,7 @@ namespace pfm
         SPDLOG_INFO("Done, remapped {} params", remaps.size());
         SPDLOG_INFO("Final comitted param memory after decommits: {:L} bytes", committed_remap_mem);
 
-        def_dump_timer.interval() = config.dump_frequency_ms;
+        def_dump_timer.interval() = config.dump_interval_ms;
         def_dump_timer.start([this] { dump_defs(); });
         remaps_done = true;
     }

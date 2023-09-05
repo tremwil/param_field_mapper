@@ -41,7 +41,7 @@ namespace pfm
     };
 
     struct PFMConfig {
-        int dump_frequency_ms = 10000;
+        int dump_interval_ms = 10000;
         bool print_original_addresses = false;
         bool print_upheld_fields = true;
         bool dump_original_addresses = true;
