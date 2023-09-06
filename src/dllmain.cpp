@@ -244,4 +244,5 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD call_reason, LPVOID reserved) {
         auto handle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)thread_entry_point, module, 0, NULL);
         return handle != INVALID_HANDLE_VALUE;
     }
+    return TRUE;
 };
