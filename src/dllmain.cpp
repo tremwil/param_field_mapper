@@ -4,6 +4,7 @@
 
 #include "paramdef_typemap.h"
 
+#include "spdlog/common.h"
 #include "spdlog/spdlog.h"
 #include "spdlog/sinks/basic_file_sink.h"
 
@@ -122,7 +123,6 @@ void bootstrap(bool is_entry_hook) {
     std::locale::global(std::locale("en_us.UTF-8"));
     set_pattern("[%T.%e] %^[%l]%$ [%s] %v");
     set_level(level::level_enum::debug);
-    flush_on(level::level_enum::err);
 
     if (!is_entry_hook) {
         SPDLOG_WARN("DLL was injected without launcher. Arxan has already run; code analysis coverage will not be as good!");
@@ -149,6 +149,8 @@ void bootstrap(bool is_entry_hook) {
             auto file_log = create<sinks::basic_file_sink_mt>("file_log", log_file_path.string());
             file_log->set_level(level::from_str(toml::find<std::string>(tbl, "log_file", "log_level")));
             file_log->set_pattern("[%T.%e] %^[%l]%$ [%s] %v");
+            file_log->flush_on(level::critical);
+            flush_every(5s);
         }
 
         default_logger()->set_level(level::from_str(toml::find<std::string>(tbl, "console", "log_level")));
