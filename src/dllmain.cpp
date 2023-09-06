@@ -122,40 +122,26 @@ void bootstrap(bool is_entry_hook) {
     
     std::locale::global(std::locale("en_us.UTF-8"));
     set_pattern("[%T.%e] %^[%l]%$ [%s] %v");
-    set_level(level::level_enum::debug);
-
-    if (!is_entry_hook) {
-        SPDLOG_WARN("DLL was injected without launcher. Arxan has already run; code analysis coverage will not be as good!");
-    }
-    else {
-        // Since we're entry hooking, Arxan hasn't set the game's memory to RWE yet. Do it now
-        auto main_module = mem::module::main();
-        DWORD old_protect;
-        if (!VirtualProtect(main_module.start.as<void*>(), main_module.size, PAGE_EXECUTE_READWRITE, &old_protect)) {
-            Panic("Failed to change memory protection of game code (error {:08X})", GetLastError());
-        }
-    }
+    set_level(level::trace);
 
     PFMConfig config;
     try {
         auto config_path = utils::dll_folder() / "config.toml";
         auto tbl = toml::parse(config_path);
 
+        default_logger()->sinks().front()->set_level(level::from_str(toml::find<std::string>(tbl, "console", "log_level")));
+        config.print_original_addresses = toml::find<bool>(tbl, "console", "print_original_addresses");
+        config.print_upheld_fields = toml::find<bool>(tbl, "console", "print_upheld_fields");
+
         fs::path log_file_path = toml::find<std::string>(tbl, "log_file", "path");
         if (!log_file_path.empty() && !log_file_path.is_absolute()) {
             log_file_path = utils::dll_folder() / log_file_path;
         }
         if (!log_file_path.empty()) {
-            auto file_log = create<sinks::basic_file_sink_mt>("file_log", log_file_path.string());
-            file_log->set_level(level::from_str(toml::find<std::string>(tbl, "log_file", "log_level")));
-            file_log->set_pattern("[%T.%e] %^[%l]%$ [%s] %v");
-            file_log->flush_on(level::critical);
-            flush_every(5s);
+            auto file_sink = std::make_shared<sinks::basic_file_sink_mt>(log_file_path.string());
+            file_sink->set_level(level::from_str(toml::find<std::string>(tbl, "log_file", "log_level")));
+            default_logger()->sinks().push_back(file_sink);
         }
-
-        default_logger()->set_level(level::from_str(toml::find<std::string>(tbl, "console", "log_level")));
-        config.print_original_addresses = toml::find<bool>(tbl, "console", "print_original_addresses");
-        config.print_upheld_fields = toml::find<bool>(tbl, "console", "print_upheld_fields");
 
         config.dump_interval_ms = toml::find<uint32_t>(tbl, "dumps", "interval");
         config.dump_original_addresses = toml::find<bool>(tbl, "dumps", "dump_original_addresses");
@@ -177,6 +163,21 @@ void bootstrap(bool is_entry_hook) {
     catch (std::exception& e) {
         Panic("Encountered exception {} while parsing config file: {}", typeid(e).name(), e.what());
     }
+
+    if (!is_entry_hook) {
+        SPDLOG_WARN("DLL was injected without launcher. Arxan has already run; code analysis coverage will not be as good!");
+    }
+    else {
+        // Since we're entry hooking, Arxan hasn't set the game's memory to RWE yet. Do it now
+        auto main_module = mem::module::main();
+        DWORD old_protect;
+        if (!VirtualProtect(main_module.start.as<void*>(), main_module.size, PAGE_EXECUTE_READWRITE, &old_protect)) {
+            Panic("Failed to change memory protection of game code (error {:08X})", GetLastError());
+        }
+    }
+
+    flush_on(level::critical);
+    flush_every(5s);
 
     arxan_disabler::disable_code_restoration();
     ParamFieldMapper::get().init(config);
