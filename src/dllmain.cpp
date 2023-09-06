@@ -12,6 +12,7 @@
 #include <errhandlingapi.h>
 #include <exception>
 #include <handleapi.h>
+#include <processenv.h>
 #include <stdexcept>
 #include <stdio.h>
 #include <winnt.h>
@@ -117,6 +118,11 @@ void create_console() {
     std::wcin.clear();
 }
 
+// Export a function other DLLs can use to read param data safely 
+extern "C" __declspec(dllexport) void* adjust_param_ptr(void* param_data_ptr) {
+    return pfm::ParamFieldMapper::get().adjust_param_ptr(param_data_ptr);
+}
+
 void bootstrap(bool is_entry_hook) {
     create_console();
     
@@ -181,28 +187,60 @@ void bootstrap(bool is_entry_hook) {
 
     arxan_disabler::disable_code_restoration();
     ParamFieldMapper::get().init(config);
+
+    /// Allow fetching the function from an env var, since the DLL name might be changed
+    SetEnvironmentVariableA("PFM_ADJUST_PARAM_PTR_ADDRESS", 
+        fmt::format("{:x}", (uintptr_t)&adjust_param_ptr).c_str());
 }
 
+/* Bootstrapping methods */
+
+// Main thread hijacking
 static uintptr_t(*ORIGINAL_ENTRY_POINT)();
 uintptr_t __stdcall hooked_entry_point() {
     bootstrap(true);
     return ORIGINAL_ENTRY_POINT();
 }
 
+// CreateThread
 DWORD __stdcall thread_entry_point(LPVOID lParam) {
     bootstrap(false);
     return 0;
 }
 
+// ME2 extension
+class ModEngineExt {
+    virtual void on_attach() {
+        SPDLOG_INFO("ME2 attach");
+    };
+    virtual void on_detach() {
+        SPDLOG_INFO("ME2 detach");
+    };
+    virtual const char* id() {
+        return "param_field_mapper";
+    };
+};
+
+static ModEngineExt ME2_EXTENSION;
+extern "C" __declspec(dllexport) bool modengine_ext_init(void* connector, ModEngineExt** extension) {
+    *extension = &ME2_EXTENSION;
+    bootstrap(true);
+    return true;
+}
+
 BOOL APIENTRY DllMain(HMODULE module, DWORD call_reason, LPVOID reserved) {
     DisableThreadLibraryCalls(module);
+    wchar_t buff[256];
+
     if (call_reason != DLL_PROCESS_ATTACH) { 
         return TRUE;
     }
     if (hijack_suspended_main_thread((void*)hooked_entry_point, &ORIGINAL_ENTRY_POINT)) {
         return TRUE;
     }
-    else {
+    // If the game was launched with ME2, wait for it to call modengine_ext_init instead of 
+    // falling back to CreateThread bootstrapping
+    else if (!GetEnvironmentVariableW(L"MODENGINE_CONFIG", buff, sizeof(buff))) {
         auto handle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)thread_entry_point, module, 0, NULL);
         return handle != INVALID_HANDLE_VALUE;
     }

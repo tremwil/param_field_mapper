@@ -56,6 +56,15 @@ namespace pfm
     public:
         void init(const PFMConfig& config = {});
 
+        void* adjust_param_ptr(void* param_data_ptr) {
+            if (!remaps_done) return param_data_ptr;
+            
+            const uint8_t* remap_begin = remap_arena.buffer().data();
+            const uint8_t* remap_end = remap_begin + remap_arena.buffer().size();
+            uint8_t* data_ptr = (uint8_t*)param_data_ptr;
+            return (remap_begin <= data_ptr && data_ptr < remap_end) ? data_ptr + shift : data_ptr;
+        }
+
     protected: 
         ParamFieldMapper() = default;
 
@@ -90,7 +99,7 @@ namespace pfm
 
         Timer def_dump_timer;
 
-        uint8_t* (*orig_memcpy)(uint8_t*, uint8_t*, size_t); 
+        void* (*orig_memcpy)(void*, void*, size_t); 
         void* (*orig_param_lookup)(SoloParamRepository*, uint32_t, uint32_t);
 
         void do_param_remaps();
@@ -115,20 +124,15 @@ namespace pfm
 
         LONG veh(EXCEPTION_POINTERS* ex);
 
-        uint8_t* memcpy_hook(uint8_t* dest, uint8_t* src, size_t size) {
-            const uint8_t* remap_begin = remap_arena.buffer().data();
-            const uint8_t* remap_end = remap_begin + remap_arena.buffer().size();
-            if (remap_begin <= src && src < remap_end) {
-                return orig_memcpy(dest, src + shift, size);
-            }
-            else return orig_memcpy(dest, src, size);
+        void* memcpy_hook(void* dest, void* src, size_t size) {
+            return orig_memcpy(dest, adjust_param_ptr(src), size);
         }
 
         static LONG veh_thunk(EXCEPTION_POINTERS* ex) {
             return ParamFieldMapper::get().veh(ex);
         }
 
-        static uint8_t* memcpy_hook_thunk(uint8_t* dest, uint8_t* src, size_t size) {
+        static void* memcpy_hook_thunk(void* dest, void* src, size_t size) {
             return get().memcpy_hook(dest, src, size);
         }
 
