@@ -72,6 +72,7 @@ namespace pfm
         std::mutex mutex;
         bool initialized = false;
         bool remaps_done = false;
+        bool remaps_queued = false;
 
         PFMConfig config;
 

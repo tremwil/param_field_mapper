@@ -190,14 +190,18 @@ namespace pfm
     }
 
     void* ParamFieldMapper::solo_param_hook(SoloParamRepository* solo_param, uint32_t bucket, uint32_t index_in_bucket) {
-        if (!remaps_done) {
+        if (!remaps_queued) {
             auto params = FD4ParamRepository::instance()->param_container;
 
             // TODO: Incremental remapping or cross-checking with regulation on disk
             // instead of hardcoding param count
             size_t num_params = std::distance(params.begin(), params.end());
             if (num_params >= 271) {
-                do_param_remaps();   
+                remaps_queued = true;
+                std::thread([this]{
+                    Sleep(500);
+                    do_param_remaps();
+                }).detach();
             }
         }
         return orig_param_lookup(solo_param, bucket, index_in_bucket);
