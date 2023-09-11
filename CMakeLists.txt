@@ -50,7 +50,7 @@ target_link_libraries(param_field_mapper PRIVATE ${STATIC_LIBS} "dbghelp.lib" "s
 target_compile_features(param_field_mapper PRIVATE cxx_std_20)
 
 # Disable min/max macros to not override std::min and std::max, and _CRT_SECURE_NO_WARNINGS and __cpp_consteval (to fix source_location)
-target_compile_definitions(param_field_mapper PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS __cpp_consteval)
+target_compile_definitions(param_field_mapper PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS __cpp_consteval)
 
 add_subdirectory(launcher)
 add_subdirectory(dependencies)

@@ -5,7 +5,11 @@
 #include <vector>
 #include <memory>
 
-#include "pugixml/pugixml.hpp"
+// Forward declare XML types
+namespace pugi {
+    class xml_node;
+    class xml_document;
+}
 
 namespace pfm
 {
@@ -35,7 +39,7 @@ namespace pfm
         std::optional<size_t> array_size; /// If set, def is an array with a certain size.
 
         /// If field was parsed from a paramdef file, the <Field> node it came from.
-        std::optional<pugi::xml_node> node;
+        std::shared_ptr<pugi::xml_node> node;
 
         /// Used to resolve type conflicts. Arbitrary scale of how confident the type resolver is.
         int type_certainty = 0;

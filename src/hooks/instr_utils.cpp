@@ -76,13 +76,10 @@ namespace pfm::instr_utils
         return new_instr_size;
     }
 
-    bool jmp_targets_heuristic(const char* mod_name, std::vector<intptr_t>& targets)
+    bool jmp_targets_heuristic(intptr_t mod_base, std::vector<intptr_t>& targets)
     {
-        HMODULE h_mod = GetModuleHandleA(mod_name);
-        if (h_mod == NULL) return false;
-
-        IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)h_mod;
-        IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)((uint8_t*)h_mod + dos->e_lfanew);
+        IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)mod_base;
+        IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)((uint8_t*)mod_base + dos->e_lfanew);
 
         IMAGE_SECTION_HEADER* sections = IMAGE_FIRST_SECTION(nt);
 
@@ -90,7 +87,7 @@ namespace pfm::instr_utils
         {
             if (!(sections[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) || strcmp((char*)sections[i].Name, ".text")) continue;
 
-            uint8_t* base = (uint8_t*)h_mod + sections[i].VirtualAddress;
+            uint8_t* base = (uint8_t*)mod_base + sections[i].VirtualAddress;
             uint8_t* end = base + sections[i].Misc.VirtualSize;
 
             hde64s instr, jmp_check;

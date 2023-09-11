@@ -65,14 +65,16 @@ namespace pfm
             friend bool operator== (const Iterator& a, const Iterator& b) { return a.rescap == b.rescap; };
             friend bool operator!= (const Iterator& a, const Iterator& b) { return a.rescap != b.rescap; }; 
 
+            Iterator() = default;
         private:
             friend struct ResRepository;
+
             Iterator(ResCap* rescap, ResCap** bucket, ResCap** past_end_bucket) :
                 rescap(rescap), bucket(bucket), past_end_bucket(past_end_bucket) {};
 
-            ResCap* rescap;
-            ResCap** bucket;
-            ResCap** past_end_bucket;
+            ResCap* rescap = nullptr;
+            ResCap** bucket = nullptr;
+            ResCap** past_end_bucket = nullptr;
         };
 
         Iterator begin() const {

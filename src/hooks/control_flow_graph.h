@@ -73,7 +73,7 @@ namespace pfm
         bool relocate(intptr_t old_addr, intptr_t new_addr);
 
         /// Walk the control flow of code starting at `addr`, following relative branches but not calls or indirect JMPs.
-        bool walk(intptr_t addr);
+        bool walk(intptr_t addr, bool follow_calls = true);
 
     private:
         std::unordered_map<intptr_t, std::unique_ptr<Branch>> branches;

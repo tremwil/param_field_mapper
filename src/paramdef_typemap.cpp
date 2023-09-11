@@ -4,6 +4,7 @@
 #include "paramdef_typemap.h"
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
+#include <pugixml/pugixml.hpp>
 
 #include "core/utils.h"
 
@@ -116,7 +117,7 @@ namespace pfm
             }
 
             DefField field {
-                .node = node,
+                .node = std::make_shared<xml_node>(node),
             };
 
             bool is_untyped = false;

@@ -96,7 +96,7 @@ namespace pfm
         return true;
     }
 
-    bool CFG::walk(intptr_t addr) {
+    bool CFG::walk(intptr_t addr, bool follow_calls) {
         ZydisDecoder decoder;
         ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
 
@@ -132,6 +132,7 @@ namespace pfm
             case ZYDIS_CATEGORY_CALL:
                 jmp_type = instruction.meta.category == ZYDIS_CATEGORY_CALL ? BranchType::Call : BranchType::Cond;
                 dfs_stack.push_back(implicit_branch);
+                if (!follow_calls && instruction.meta.category == ZYDIS_CATEGORY_CALL) break;
                 [[fallthrough]];
             case ZYDIS_CATEGORY_UNCOND_BR: {
                 // Compute new RIP, if possible
@@ -141,7 +142,7 @@ namespace pfm
                 if (!has_modrm 
                     && ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&instruction, &operands[0], addr, &out_addr)) 
                     && out_addr != implicit_branch 
-                    && !IsBadReadPtr((void*)out_addr, 8)) 
+                    && !IsBadReadPtr((void*)out_addr, 8)) // Guard against invalid code
                 {
                     add_branch(addr, jmp_type, { (intptr_t)out_addr });
                     dfs_stack.push_back(out_addr);

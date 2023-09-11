@@ -1,6 +1,5 @@
 #pragma once
 #include "fst/dlut.h"
-#include <concepts>
 #include <optional>
 
 namespace pfm

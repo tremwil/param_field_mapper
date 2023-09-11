@@ -1,6 +1,6 @@
 #pragma once
 #include "core/lite_mem_stream.h"
-#include "hde/hde64.h" // We should be using zydis, but this is from an old project
+#include "hde/hde64.h"
 #include <vector>
 
 namespace pfm::instr_utils
@@ -18,5 +18,5 @@ namespace pfm::instr_utils
 
     /// Populates a map of all potential JMP/JCC/CALL instructions targets, ordered for binary search.
     /// False positives will be present, the point is to avoid doing CFG analysis of the entire image.
-    bool jmp_targets_heuristic(const char* mod_name, std::vector<intptr_t>& targets);
+    bool jmp_targets_heuristic(intptr_t mod_base, std::vector<intptr_t>& targets);
 };

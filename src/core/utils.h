@@ -1,5 +1,4 @@
 #pragma once
-#include <Windows.h>
 #include <filesystem>
 #include <span>
 
@@ -11,17 +10,6 @@
 namespace pfm
 {
 	namespace fs = std::filesystem;
-
-	/// Struct which will run the given lambda on construction. This is useful for RAII initialization when one 
-	/// of the fields may require a global resource to be initialized, for example.
-	struct RAIILambda
-	{
-		template<std::invocable<> F>
-		RAIILambda(F lambda)
-		{
-			lambda();
-		}
-	};
 
 #define PFM_ENUM_CLASS_BITWISE_NEG(E) \
 	constexpr E operator~ (E e) \

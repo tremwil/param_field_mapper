@@ -1,6 +1,7 @@
 #include "hook_arena.h"
 #include "instr_utils.h"
 #include "spdlog/spdlog.h"
+#include "core/utils.h"
 
 #include <psapi.h>
 #include <vector>

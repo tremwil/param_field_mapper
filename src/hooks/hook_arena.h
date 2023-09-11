@@ -1,6 +1,6 @@
 #pragma once
-#include "core/core.h"
 #include "core/lite_mem_stream.h"
+#include <vector>
 
 namespace pfm
 {
@@ -9,13 +9,6 @@ namespace pfm
         void* trampoline = nullptr;
         std::span<uint8_t> modified_code;
         std::vector<uint8_t> old_code;
-
-        /// Restores the modified code. 
-        inline void restore() {
-            utils::patch_memory(modified_code, [&](){
-                std::copy(old_code.begin(), old_code.end(), modified_code.data());
-            });
-        }
     };
 
     struct JmpHookInfo : public TrampolineInfo {

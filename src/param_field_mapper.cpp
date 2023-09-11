@@ -1,26 +1,15 @@
 #include "param_field_mapper.h"
-#include "core/utils.h"
-#include "fst/fd4_param_repository.h"
-#include "hooks/control_flow_graph.h"
+#include "hde/hde64.h"
 #include "hooks/instr_utils.h"
 #include "arxan_disabler.h"
 
-#include "hooks/trampoline.h"
-#include "paramdef_typemap.h"
-#include "spdlog/spdlog.h"
-#include "zydis/Zydis.h"
-
 #include "mem/pattern.h"
+#include "spdlog/fmt/bin_to_hex.h"
+#include "spdlog/spdlog.h"
 
 #include <Windows.h>
-#include <algorithm>
-#include <cctype>
-#include <conio.h>
-#include <excpt.h>
-#include <filesystem>
-#include <fstream>
-#include <spdlog/fmt/bin_to_hex.h>
 
+#include <excpt.h>
 #include <winnt.h>
 #include <winternl.h>
 
@@ -49,27 +38,9 @@ namespace pfm
 
         this->config = config;
 
-        SPDLOG_INFO("Finding potential JMP targets...");
-        if (!instr_utils::jmp_targets_heuristic(nullptr, jmp_targets_heuristic)) {
-            Panic("JMP targets heuristic failed");
-        }
-        SPDLOG_INFO("Done, found {:L} potential targets", jmp_targets_heuristic.size());
-
-        SPDLOG_INFO("Computing program-wide CFG. Dissassembly errors expected!");
-        uint8_t* module_base = (uint8_t*)GetModuleHandle(NULL);
-        auto ex_tbl = cfg_utils::get_exception_table(module_base);
-        for (const auto& rf: ex_tbl) {
-            auto cinfo = (UNWIND_INFO*)(module_base + rf.UnwindInfoAddress);
-            if (cinfo->Flags & UNW_FLAG_CHAININFO) continue;
-            flow_graph.walk((intptr_t)module_base + rf.BeginAddress);
-        }
-        SPDLOG_INFO("Done, walked {} functions in exception table", ex_tbl.size());
-
-        if (config.load_existing_defs) {
-            load_existing_defs();
-        }
-
+        patcher.prepare_module((intptr_t)GetModuleHandleA(nullptr));
         hook_solo_param_lookup();
+
         SPDLOG_INFO("Waiting for params to be loaded...");
 
         initialized = true;
@@ -77,127 +48,93 @@ namespace pfm
 
     void ParamFieldMapper::do_param_remaps() {
         std::lock_guard lock(mutex);
-        std::lock_guard defs_lock(def_copy_mutex);
         if (remaps_done) return;
 
-        auto param_repo = FD4ParamRepository::instance();
+        auto& param_repo = FD4ParamRepository::instance()->param_container;
+        auto res = remaps.remap_repo(&param_repo);
+        if (!res) {
+            SPDLOG_CRITICAL(res.error().message());
+        }
 
-        alloc_param_remap_mem(param_repo);
-        
+        SPDLOG_INFO("Done, remapped {} params. file = +{:x}, flags = +{:x}", 
+            remaps.remapped_files.size(), remaps.file_shift, remaps.flags_shift);
+
+        SPDLOG_INFO("Remap block size: {:L} bytes, Committed: {:L} bytes",
+            remaps.reserved_memory_block.buffer().size(), remaps.total_committed_mem());
+
         AddVectoredExceptionHandler(TRUE, &ParamFieldMapper::veh_thunk);
         hook_memcpy();
 
-        for (auto& file_cap: param_repo->param_container) {
-            auto param_name = utils::wide_string_to_string(file_cap.resource_name);
-            auto rs = file_cap.param_file->row_size();
-            if (!rs.has_value()) {
-                Panic("Failed to deduce row size of param {}", param_name);
-            }
-            auto [it, inserted] = defs.insert(std::make_pair(param_name, ParamdefTypemap {
-                .param_name = param_name
-            }));
-            auto& def = it->second;
-            if (!inserted && def.row_size != *rs) {
-                Panic("Row size of existing def for {} ({}) does not match computed value ({})",
-                    param_name, def.row_size, *rs);
-            }
-
-            def.data_version = file_cap.param_file->paramdef_data_version;
-            def.big_endian = file_cap.param_file->is_big_endian;
-            def.unicode = file_cap.param_file->is_unicode();
-            def.row_size = *rs;
-
-            std::string_view param_type { file_cap.param_file->param_type() };
-            if (!def.param_type.has_value() && !param_type.empty() &&
-                !std::any_of(param_type.begin(), param_type.end(), [](auto c) { return c < '!' || c > 'z'; })) 
-            {
-                def.param_type = param_type;
-            }
-
-            remap_param_file(file_cap);
+        for (const auto& f: remaps.remapped_files) {
+            defs[f.param_name] = { .remapped_file = &f };
+            f.replace_original_file();
         }
 
-        SPDLOG_INFO("Done, remapped {} params", remaps.size());
-        SPDLOG_INFO("Final comitted param memory after decommits: {:L} bytes", committed_remap_mem);
-
-        def_dump_timer.interval() = config.dump_interval_ms;
+        def_dump_timer.interval() = 1000; // config.dump_interval_ms;
         def_dump_timer.start([this] { dump_defs(); });
         remaps_done = true;
     }
 
     void ParamFieldMapper::load_existing_defs() {
-        std::lock_guard lock(def_copy_mutex);
         
-        SPDLOG_INFO("Loading existing paramdefs...");
+        // SPDLOG_INFO("Loading existing paramdefs...");
 
-        auto dump_path = utils::dll_folder() / "paramdefs";
-        fs::create_directory(dump_path);
+        // auto dump_path = utils::dll_folder() / "paramdefs";
+        // fs::create_directory(dump_path);
 
-        size_t num_loaded = 0;
-        for (const auto& f : fs::directory_iterator(dump_path)) {
-            if (!f.is_regular_file() || f.path().extension() != ".xml") {
-                SPDLOG_WARN("{} is not an XML paramdef, skipping", f.path().string());
-                continue;
-            }
-            if (auto def = ParamdefTypemap::from_xml(f.path().string(), config.def_parse_options)) {
-                defs[def->param_name] = std::move(*def);
-                num_loaded++;
-                SPDLOG_TRACE("Loaded paramdef {}", f.path().string());
-            }
-        }
-        SPDLOG_INFO("Loaded {} existing XML paramdefs", num_loaded);
+        // size_t num_loaded = 0;
+        // for (const auto& f : fs::directory_iterator(dump_path)) {
+        //     if (!f.is_regular_file() || f.path().extension() != ".xml") {
+        //         SPDLOG_WARN("{} is not an XML paramdef, skipping", f.path().string());
+        //         continue;
+        //     }
+        //     if (auto def = ParamdefTypemap::from_xml(f.path().string(), config.def_parse_options)) {
+        //         defs[def->param_name] = std::move(*def);
+        //         num_loaded++;
+        //         SPDLOG_TRACE("Loaded paramdef {}", f.path().string());
+        //     }
+        // }
+        // SPDLOG_INFO("Loaded {} existing XML paramdefs", num_loaded);
     }
 
     void ParamFieldMapper::dump_defs() {
-        def_copy_mutex.lock();
-        auto defs_copy = defs;
-        auto accesses_copy = simd_accesses;
-        def_copy_mutex.unlock();
+        //auto dump_path = utils::dll_folder() / "paramdefs";
+        //fs::create_directory(dump_path);
 
-        auto dump_path = utils::dll_folder() / "paramdefs";
-        fs::create_directory(dump_path);
-
-        for (const auto& [name, def]: defs_copy) {
-            auto path = dump_path / (name + ".xml");
-            def.serialize_to_xml(path.string(), config.def_serialize_options);
+        for (auto& [k, d]: defs) {
+            d.update_deductions(true);
         }
-
-        if (config.dump_simd_accesses) {
-            std::ofstream fs;
-            fs.open(utils::dll_folder() / "simd_accesses.csv", std::fstream::trunc);
-            for (const auto& [addr, param, ofs] : accesses_copy) {
-                fs << fmt::format("{:x}, {}, 0x{:03x}", addr, param, ofs) << std::endl;
-            }
-            fs.close();
-        }
-
-        SPDLOG_INFO("Dumped {} paramdefs to disk", defs_copy.size());
     }
 
     void ParamFieldMapper::hook_solo_param_lookup() {
         mem::pattern lookup_aob { "81 fa 07 01 00 00 7d ?? 48 63 d2 48 8d 04 d2" };
         
-        auto lookup_addr = mem::scan(lookup_aob, utils::main_module_section<".text">()).as<uint8_t*>();
+        auto lookup_addr = mem::scan(lookup_aob, utils::main_module_section<".text">()).as<intptr_t>();
         if (!lookup_addr) {
-            Panic("Failed to find memcpy function");
+            Panic("Failed to find SoloParamRepository::getParamResCapById function");
         }
 
-        auto& arena = hook_arena_pool.get_or_create_arena(lookup_addr);
-        auto jmp_hook_info = arena.gen_jmp_hook(lookup_addr, (void*)&solo_param_hook_thunk);
-        orig_param_lookup = (decltype(orig_param_lookup))jmp_hook_info.trampoline;
+        orig_param_lookup = patcher.jmp_hook(lookup_addr, &solo_param_hook_thunk);
+        if (!orig_param_lookup) {
+            Panic("Failed to JMP hook SoloParamRepository::getParamResCapById function at {:x}", lookup_addr);
+        }
 
-        SPDLOG_INFO("Hooked SoloParamRepository lookup at {:x}", (intptr_t)orig_param_lookup);
+        SPDLOG_INFO("Hooked SoloParamRepository lookup at {:x}", lookup_addr);
     }
 
     void* ParamFieldMapper::solo_param_hook(SoloParamRepository* solo_param, uint32_t bucket, uint32_t index_in_bucket) {
-        if (!remaps_done) {
+        if (!remaps_queued) {
             auto params = FD4ParamRepository::instance()->param_container;
 
             // TODO: Incremental remapping or cross-checking with regulation on disk
             // instead of hardcoding param count
             size_t num_params = std::distance(params.begin(), params.end());
             if (num_params >= 271) {
-                do_param_remaps();   
+                remaps_queued = true;
+                std::thread([this]{
+                    Sleep(500);
+                    do_param_remaps();   
+                }).detach();
             }
         }
         return orig_param_lookup(solo_param, bucket, index_in_bucket);
@@ -206,326 +143,107 @@ namespace pfm
     void ParamFieldMapper::hook_memcpy() {
         mem::pattern memcpy_aob { "4c 8b d9 4c 8b d2 49 83 f8 10 0f 86 ?? ?? ?? ?? 49 83 f8 20" };
 
-        auto memcpy_addr = mem::scan(memcpy_aob, utils::main_module_section<".text">()).as<uint8_t*>();
+        auto memcpy_addr = mem::scan(memcpy_aob, utils::main_module_section<".text">()).as<intptr_t>();
         if (!memcpy_addr) {
             Panic("Failed to find memcpy function");
         }
 
-        auto& arena = hook_arena_pool.get_or_create_arena(memcpy_addr);
-        auto jmp_hook_info = arena.gen_jmp_hook(memcpy_addr, (void*)&memcpy_hook_thunk);
-        orig_memcpy = (decltype(orig_memcpy))jmp_hook_info.trampoline;
+        orig_memcpy = patcher.jmp_hook(memcpy_addr, &memcpy_hook_thunk);
+        if (!orig_memcpy) {
+            Panic("Failed to JMP hook game memcpy function at {:x}", memcpy_addr);
+        }
 
-        SPDLOG_INFO("Hooked memcpy at {:x}", (intptr_t)memcpy_addr);
+        SPDLOG_INFO("Hooked memcpy at {:x}", memcpy_addr);
     }
 
-    void ParamFieldMapper::alloc_param_remap_mem(FD4ParamRepository* param_repo) {
-        SYSTEM_INFO sysinfo;
-        GetSystemInfo(&sysinfo);
+    void ParamFieldMapper::gen_access_hook(LiteMemStream& arena, uint8_t* original, ParamAccessFlags flags) {
+        using namespace std::literals;
 
-        shift = 0;
-        size_t num_params = 0;
-        size_t no_shift_req_mem = 0; // Total required memory outside of shift between trap and true param files
-    
-        for (auto& file_cap : param_repo->param_container) {
-            num_params++;
-            auto file = file_cap.param_file;
-            shift = std::max(shift, file_cap.param_file_size +  sysinfo.dwPageSize);
-            no_shift_req_mem += 
-                sysinfo.dwPageSize + // Alignment requirements to put the row data start on a page boundary
-                16 + // to accomodate fromsoft shitcode writing sorted id table offsets before param file 
-                file_cap.param_file_size + // "true" file copy we redirect instructions to
-                16 + // alignment requirements of offset to sorted id table
-                8 * file->row_count; // sorted id table memory
-        }
-        shift = utils::align_up(shift, 16); // Force 16-byte alignment to shift, to avoid unaligned access
-        committed_remap_mem = no_shift_req_mem + shift * num_params;
-
-        SPDLOG_INFO("Required param file shift is {} => must reserve {:L} byte block", shift, committed_remap_mem);
+        hde64s disasm_orig;
+        hde64_disasm(original, &disasm_orig);
         
-        auto alloc_base = (uint8_t*)VirtualAlloc(NULL, committed_remap_mem, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-        if (!alloc_base) {
-            Panic("VirtualAlloc failed, error = {:08x}", GetLastError());
+        if (disasm_orig.flags & F_ERROR) {
+            Panic("Failed to dissassemble: {:n}", spdlog::to_hex(original, original + disasm_orig.len));
         }
-        remap_arena = { alloc_base, committed_remap_mem };
-    }
-
-    void ParamFieldMapper::remap_param_file(ParamFileCap& file_cap) {
-        // We create a memory block with the following structure:
-        // alloc base
-        // "true" trap param file start ... trap param file ID table end
-        // noaccess memory pages covering rest of trap param file
-        // garbage re-sort of ID table for binary search (fromsoft please)
-        // "true" param file copy to direct reads to
-
-        SYSTEM_INFO sysinfo;
-        GetSystemInfo(&sysinfo);
-
-        auto file = file_cap.param_file;
-        std::span file_bytes { (uint8_t*)file, file_cap.param_file_size };
-
-        // Someone at fromsoft should never be allowed to write code again
-        // For some reason instead of binary searching over the ID/name offset/row offset table,
-        // they create a (id, ParamRow) pair array, store it 16 bytes *BEFORE* the param file,
-        // and binary search on that instead!?!?!?!?!?!?!?
-        //
-        // We'll have to copy it over too
-        std::span sorted_table { 
-            (uint8_t*)file + utils::align_up(*(int32_t*)((intptr_t)file - 16), 16), 8ull * file->row_count
-        };
-
-        RemappedParamFile remap;
-        remap.file_cap = &file_cap;
-        remap.param_name = utils::wide_string_to_string(file_cap.resource_name);
-        
-        // Copy and shift param files
-
-        size_t id_table_end_ofs = file->id_table_end_offset();
-        remap_arena.advance(id_table_end_ofs + 16);
-        remap_arena.align(sysinfo.dwPageSize);
-
-        remap.noaccess_mem_start = remap_arena.ptr();
-        remap_arena.advance(-id_table_end_ofs);
-
-        remap.trap_file = (ParamFile*)remap_arena.ptr();
-        remap_arena.write(file_bytes);
-
-        auto unused_pages_start = utils::align_up(remap_arena.ptr(), sysinfo.dwPageSize);
-        remap_arena.advance(shift - file_bytes.size());
-
-        // Save on comitted memory by decommitting unused pages until proper shift offset
-        auto unused_pages_end = utils::align_down(remap_arena.ptr(), sysinfo.dwPageSize);
-        if (unused_pages_end > unused_pages_start) {
-            VirtualFree(unused_pages_start, unused_pages_end - unused_pages_start, MEM_DECOMMIT);
-            committed_remap_mem -= unused_pages_end - unused_pages_start;
+        if (!(disasm_orig.flags & F_MODRM)) {
+            Panic("Attempted to generate access hook for non MODRM instruction: {:n}", 
+                spdlog::to_hex(original, original + disasm_orig.len));
         }
 
-        remap.true_file = (ParamFile*)remap_arena.ptr();
-        remap_arena.write(file_bytes);
+        uint8_t patched[15];
+        auto patched_code_size = instr_utils::gen_new_disp(
+            patched, original, instr_utils::get_disp(original) + remaps.file_shift);
 
-        // Copy sorted table
-        
-        size_t sorted_table_ofs = utils::align_up(remap_arena.ptr() - (uint8_t*)remap.trap_file, 16);
-        remap.sorted_table_start = (uint8_t*)remap.trap_file + sorted_table_ofs;
-        remap_arena.seek_ptr(remap.sorted_table_start);
-        remap_arena.write(sorted_table);
-        *(int32_t*)((intptr_t)remap.trap_file - 16) = sorted_table_ofs;
-        *(int32_t*)((intptr_t)remap.trap_file - 12) = file->row_count;
-
-        if (remap_arena.is_eof()) {
-            Panic("Ran out of remap memory while remapping param {}", remap.param_name);
-        }
-        
-        // Compute row table we'll use to binary search for which row we're currently into
-        
-        if (auto sz = remap.trap_file->row_size()) {
-            remap.row_size = *sz;
-            remap.trap_file->for_each_row<char>([&remap](uint32_t id, void* row, const char* name) {
-                remap.row_ends.push_back((intptr_t)row + remap.row_size);
-            });
-            std::sort(remap.row_ends.begin(), remap.row_ends.end());
-        }
-        else {
-            Panic("Cannot determine row size of {}", remap.param_name);
+        if (patched_code_size == 0) {
+            Panic("Failed to patch displacement of instruction: {:n}", 
+                spdlog::to_hex(original, original + disasm_orig.len));
         }
 
-        // Set protection of noaccess "trap" memory pages, apply and store remap
+        const size_t LOCK_OR_LEN = flags ? 8 : 0;
 
-        DWORD old_protect;
-        size_t noaccess_mem_size = utils::align_up(file_cap.param_file_size - id_table_end_ofs, sysinfo.dwPageSize);
-        if (!VirtualProtect(remap.noaccess_mem_start, noaccess_mem_size, PAGE_NOACCESS, &old_protect)) {
-            Panic("VirtualProtect failed, error = {:08x}", GetLastError());
-        }
-        
-        SPDLOG_DEBUG("Remapped param {} (row size {}) [{:p} -> {:p}]", remap.param_name, remap.row_size,
-            (void*)remap.trap_file, (void*)remap.true_file);
+        // pushf
+        // mov qword ptr [rsp - 8], rax
+        // mov qword ptr [rsp - 16], rbx
+        constexpr auto save_registers = "\x9C\x48\x89\x44\x24\xF8\x48\x89\x5C\x24\xF0"sv;
 
-        file_cap.param_file = remap.trap_file;
-        remaps[(intptr_t)remap.trap_file + file_cap.param_file_size] = std::move(remap);
-    }
+        // mov rax, qword ptr [rsp - 8]
+        // mov rbx, qword ptr [rsp - 16]
+        // popf
+        constexpr auto restore_registers = "\x48\x8B\x44\x24\xF8\x48\x8B\x5C\x24\xF0\x9D"sv;
 
-    void ParamFieldMapper::update_field_maps(intptr_t code_addr, intptr_t access_addr, CONTEXT* thread_ctx) {
-        // Find remapped param file & offset
+        // {save registers}
+        arena.write(save_registers);
 
-        auto remap_it = remaps.upper_bound(access_addr);
-        if (remap_it == remaps.end() || access_addr < (intptr_t)remap_it->second.noaccess_mem_start) {
-            Panic("Access violation outside of noaccess param memory at {:x} (accessed {:x})", 
-                code_addr, access_addr);
-        }
-        auto& remapped_file = remap_it->second;
-        auto maybe_ofs = remapped_file.field_offset(access_addr);
-        if (!maybe_ofs.has_value()) {
-            SPDLOG_WARN("{:x} accessed non-row data at {:x} (file offset 0x{:x}) in param {}", code_addr, 
-                access_addr, access_addr - (intptr_t)remapped_file.trap_file, remapped_file.param_name);
-            return;
-        }
-        auto ofs = maybe_ofs.value();
-
-        // Decode instruction and fetch memory operand metadata
-
-        ZydisDecoder decoder;
-        ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
-
-        ZydisDecodedInstruction instruction;
-        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-
-        if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, (void*)code_addr, 
-            ZYDIS_MAX_INSTRUCTION_LENGTH, &instruction, operands))) 
-        {
-            Panic("Zydis failed to decompile instruction at {:x}", code_addr);
+        // lea rax, [modrm]
+        if (!instr_utils::gen_lea(&arena, &disasm_orig)) {
+            Panic("Failed to generate LEA for instruction: {:n}", 
+                spdlog::to_hex(original, original + disasm_orig.len));    
         }
 
-        const auto orig_addr_it = to_original_instruction.find(code_addr);
-        const auto orig_addr = (orig_addr_it != to_original_instruction.end()) ? 
-            orig_addr_it->second : code_addr;
+        // movabs rbx, region_begin
+        arena.write<uint16_t>(0xBB48);
+        arena.write(remaps.reserved_memory_block.buffer().data());
+        // cmp rax, rbx
+        arena.write("\x48\x39\xD8"sv);
 
-        const auto print_addr = config.print_original_addresses ? orig_addr : code_addr;
-        const auto dump_addr = config.dump_original_addresses ? orig_addr : code_addr;
+        // jl normal_behavior
+        arena.write<uint8_t>(0x7C);
+        arena.write<uint8_t>(17 + restore_registers.size() + patched_code_size + LOCK_OR_LEN);
 
-        ZydisDecodedOperand* mem_op = nullptr;
-        for (int i = 0; i < instruction.operand_count; i++) {
-            if (operands[i].type != ZYDIS_OPERAND_TYPE_MEMORY) continue;
-            mem_op = operands + i;
-            break;
-        }
-        if (mem_op == nullptr) {
-            Panic("Param-accessing instruction at {:x} has no memory operand!?!?!", print_addr);
-        }
+        // movabs rbx, end
+        arena.write<uint16_t>(0xBB48);
+        arena.write(remaps.reserved_memory_block.buffer().data() + remaps.reserved_memory_block.buffer().size());
+        // cmp rax, rbx
+        arena.write("\x48\x39\xD8"sv);
 
-        SPDLOG_TRACE("{:x} accessed offset 0x{:x} in {} (access width {})", 
-                code_addr, ofs, remapped_file.param_name, mem_op->size);
+        // jae normal_behavior
+        arena.write<uint8_t>(0x73);
+        arena.write<uint8_t>(2 + restore_registers.size() + patched_code_size + LOCK_OR_LEN);
 
-        // Ignore unaligned or >64 bit operations
-        if ((mem_op->element_size & 7) || mem_op->element_size > 64) {
-            SPDLOG_WARN("Unsupported load size for instruction at {:x} ({} bits), ignoring", print_addr, mem_op->size);
-            return;
-        }
-        // Ignore operarations with more than one element (SIMD loads)
-        if (mem_op->element_count > 1) {
-            SPDLOG_WARN("{:x} acessing {} in {} is a SIMD load ({} bits), ignoring", 
-                print_addr, ofs, remapped_file.param_name, mem_op->size);
-            
-            std::lock_guard lock(def_copy_mutex);
-            simd_accesses.push_back(std::tie(dump_addr, remapped_file.param_name, ofs));
-            return;
-        }
-        if (ofs % (mem_op->element_size / 8)) {
-            SPDLOG_WARN("Misaligned access in {} at {:x} (ofs 0x{:x}, align {})", 
-                remapped_file.param_name, print_addr, ofs, mem_op->element_size / 8);
+        if (flags) {
+            // lock or byte ptr [rax + flags_shift], FLAGS
+            arena.write("\xf0\x80\x88"sv);
+            arena.write<int32_t>(remaps.flags_shift);
+            arena.write(flags);
         }
 
-        // Register new field defs
+        // {restore registers}
+        arena.write(restore_registers);
+        // {patched_instruction}
+        arena.write(std::span { patched, patched_code_size });
 
-        std::lock_guard lock(def_copy_mutex);
-        auto& def = defs.at(remapped_file.param_name);
+        // jmp end
+        arena.write<uint8_t>(0xEB);
+        arena.write<uint8_t>(restore_registers.size() + disasm_orig.len);
 
-        const intptr_t elem_addr = access_addr + shift;
-        const uint64_t sign_bit = 1ull << (mem_op->element_size - 1);
-        const uint64_t raw_value = *(uint64_t*)elem_addr & (2 * sign_bit - 1);
-        DefField field {
-            .type_size_bits = (size_t)mem_op->element_size,
-            .elem_size_bits = (size_t)mem_op->element_size 
-        };
+        /* normal_behavior: */
 
-        // Using SIB; this is likely one element of an array type.
-        if (instruction.attributes & ZYDIS_ATTRIB_HAS_SIB) {
-            field.array_size = 1;
-        }
+        // {restore registers}
+        arena.write(restore_registers);
+        // {orig_instruction}
+        arena.write(std::span { original, disasm_orig.len });
 
-        // Deduce field type based on available information
-        switch (mem_op->element_type) {
-            case ZYDIS_ELEMENT_TYPE_FLOAT32:
-            case ZYDIS_ELEMENT_TYPE_FLOAT64:
-                field.type = ValueType::Float;
-                field.type_certainty = 2;
-                break;
-            case ZYDIS_ELEMENT_TYPE_INT:
-                if (instruction.mnemonic == ZYDIS_MNEMONIC_MOVSX) {
-                    field.type = ValueType::Signed;
-                    field.type_certainty = 2; // Instruction implies sign extension
-                }
-                // Else, unsigned values that actually use the whole range are quite rare
-                // So give a higher certainty if we hit a value with the sign bit set
-                else if (raw_value & sign_bit) {
-                    field.type = ValueType::Signed;
-                    field.type_certainty = 1;
-                }
-                else {
-                    field.type = ValueType::Unsigned;
-                    field.type_certainty = 0;
-                }
-                break;
-            case ZYDIS_ELEMENT_TYPE_UINT:
-                field.type = ValueType::Unsigned;
-                field.type_certainty = 2; // Zydis sets type UINT for zero-extended loads
-                break;
-            default:
-                SPDLOG_WARN("{:x} has non-standard element type (ZYDIS_ELEMENT_TYPE {})", 
-                    code_addr, (int)mem_op->element_type);
-                
-                field.type = ValueType::Unsigned;
-                field.type_certainty = 0;
-                break;
-        }
-
-        // Try to add deduced field to paramdef typemap
-        auto [conflict, result] = def.try_add_field(8 * ofs, field);
-        if (result == DefAddFieldResult::ConflictRejected) {
-            const auto conflict_ofs = conflict->first / 8;
-            const auto conflict_field_name = conflict->second.as_struct_field_decl("");
-            SPDLOG_WARN("{:x} causes conflict in def for {}: {} at 0x{:x} (new) vs {} at 0x{:x} (old)",
-            print_addr, def.param_name, field.as_fs_type_name(), ofs, conflict_field_name, conflict_ofs);
-        }
-        else {
-            auto& accesses = conflict->second.accesses;
-            if (std::find(accesses.begin(), accesses.end(), dump_addr) == accesses.end())
-                accesses.push_back(dump_addr);
-
-            const char* verb = "deduced";
-            if (result == DefAddFieldResult::AlreadyExists) {
-                if (!config.print_upheld_fields) return;
-                verb = "upholds";
-            }
-            else if (result == DefAddFieldResult::ConflictAccepted) verb = "updated";
-            
-            SPDLOG_DEBUG("{:x} {} {: <3} at offset 0x{:03x} in {}", 
-                print_addr, verb, field.as_fs_type_name(), ofs, remapped_file.param_name);
-        }
-    }
-
-    void ParamFieldMapper::extend_flow_graph_if_required(
-        intptr_t code_address, size_t code_len, CONTEXT* thread_ctx) 
-    {
-        // If a JMP REL32 can fit, we don't care
-        if (code_len <= 5) return;
-
-        auto jmp_point = std::upper_bound(jmp_targets_heuristic.begin(), 
-            jmp_targets_heuristic.end(), code_address);
-        
-        // Not found
-        if (jmp_point == jmp_targets_heuristic.end()) return;
-         // Confirmed false positive (doesn't match instruction boundary)
-        if (*jmp_point < code_address + code_len) return; 
-        // Instruction would not prevent insertion of a JMP REL32
-        if (*jmp_point >= code_address + 5) return;
-
-        SPDLOG_WARN("relocating at {:x} may lead to a mid-instruction jmp", code_address);
-
-        // Instruction already visited, no need to walk a second time
-        if (flow_graph.visited_instruction(code_address)) return;
-
-        auto fun_begin = cfg_utils::find_function(code_address, thread_ctx->Rsp);
-        if (fun_begin) {
-            SPDLOG_DEBUG("Found function begin {:x} for instruction at {:x}", fun_begin, code_address);
-        }
-        else Panic("Failed to find function start for instruction at {:x}", code_address);
-    
-        if (!flow_graph.walk(fun_begin)) {
-            Panic("Failed to compute control flow graph for instruction at at {:x}", code_address);
-        }
-        if (flow_graph.visited_instruction(code_address)) {
-            SPDLOG_INFO("Success of flow analysis back to original instruction at {:x}", code_address);
-        }
-        else Panic("Flow analysis failed to re-discover access instruction at {:x}", code_address);
+        // end:
     }
 
     LONG ParamFieldMapper::veh(EXCEPTION_POINTERS* eptrs) {
@@ -543,10 +261,14 @@ namespace pfm
         else if (ecode != EXCEPTION_ACCESS_VIOLATION)
             return EXCEPTION_CONTINUE_SEARCH;
 
-        // Sanity check to make sure an access violation doesn't occur in a previously patched instruction
-        if (patches.contains(code_address)) {
-            suspend_threads();
-            Panic("Previously patched instruction at {:x}", code_address);
+        mem::region param_mem {
+            remaps.reserved_memory_block.buffer().data(), 
+            remaps.reserved_memory_block.buffer().size()
+        };
+        // Check if patch is in range
+        if (!param_mem.contains(accessed_addr)) {
+            SPDLOG_CRITICAL("Access violation outside of param memory at {:x}", code_address);
+            return EXCEPTION_CONTINUE_SEARCH;
         }
 
         // In hot multithreaded code, a second thread might hit the instruction before patches are observed.
@@ -559,57 +281,35 @@ namespace pfm
             return EXCEPTION_CONTINUE_EXECUTION;
         }
 
-        update_field_maps(code_address, accessed_addr, ctx);
-
-        hde64s instr;
-        hde64_disasm((uint8_t*)code_address, &instr);
-
-        uint8_t patched_code[15];
-        auto patched_code_size = instr_utils::gen_new_disp(
-            patched_code, (uint8_t*)code_address, 
-            instr_utils::get_disp((uint8_t*)code_address) + shift);
-
-        if (patched_code_size == 0) {
-            Panic("Failed to patch displacement of instruction at {:x}", code_address);
+        auto prepare_result = patcher.light_prepare_if_required(code_address);
+        if (prepare_result != ExtendFlowGraphResult::Success) {
+            Panic("Critical error during CFG extension");
         }
 
-        extend_flow_graph_if_required(code_address, instr.len, ctx);
-        auto& hook_arena = hook_arena_pool.get_or_create_arena((void*)code_address);
-
+        // Copy the instruction to avoid relocations
         uint8_t original_code[15];
-        std::memcpy(original_code, (uint8_t*)code_address, instr.len);
+        std::memcpy(original_code, (uint8_t*)code_address, 15);
 
-        intptr_t final_patch_address = 0; 
-        auto gen_patch = [&]{ 
-            final_patch_address = (intptr_t)hook_arena.ptr();
-            hook_arena.gen_cond_access_hook(original_code, patched_code,
-                (uintptr_t)remap_arena.buffer().data(), 
-                (uintptr_t)remap_arena.buffer().data() + remap_arena.buffer().size());
-        };
+        auto rflags = ParamAccessFlags::from_instruction((uint8_t*)code_address);
+        if (rflags == cpp::fail(ParamAccessFlags::Error::IsSimd)) {
+            SPDLOG_WARN("{:x} is a SIMD load, ignoring...", code_address);
+        }
+        else if (!rflags) {
+            Panic("Failed to compute access flags for instruction at {:x}", code_address);
+        }
+        auto flags = rflags.value_or(ParamAccessFlags{});
 
-        /// Update flow graph while building trampoline if required
-        auto cfg = flow_graph.visited_instruction(code_address) ? &flow_graph : nullptr;
-        auto result = trampoline::gen_trampoline(hook_arena, gen_patch, (uint8_t*)code_address, true, cfg);
-        if (!result) {
-            Panic("Trampoline generation at {:x} failed", code_address);
+        auto hook_addr = patcher.instruction_hook(
+            code_address, [&](auto& a, const auto& _) { gen_access_hook(a, original_code, flags); }, true);
+
+        if (!hook_addr) {
+            Panic("Failed to generate instruction hook at {:x}", code_address);
         }
 
-        // Compose relocation address map with global map to original instruction 
-        for (const auto& [prv, reloc] : result.address_map) {
-            auto iprv = (intptr_t)prv, ireloc = (intptr_t)reloc;
-            auto it = to_original_instruction.find(iprv);
-            if (it != to_original_instruction.end()) {
-                auto nh = to_original_instruction.extract(it);
-                nh.key() = ireloc;
-                to_original_instruction.insert(std::move(nh));
-            }
-            else to_original_instruction[ireloc] = iprv;
-        }
+        // SPDLOG_DEBUG("{:x}, {:x}", code_address, hook_addr);
         
-        ctx->Rip = final_patch_address;
-        patch_map[code_address] = final_patch_address;
-        patches.insert(final_patch_address);
-        
+        ctx->Rip = hook_addr;
+        patch_map[code_address] = hook_addr;
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 }
