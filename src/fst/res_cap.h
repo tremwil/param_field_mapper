@@ -25,7 +25,7 @@ namespace pfm
 
     /// FD4ResCap struct which encapsulates a param file container. 
     struct ParamResCap : public FD4ResCap {
-        uint8_t unk_00[0x10];
+        uint8_t unk_00[0x20];
         ParamFileCap* param_file_cap;
     };
 
