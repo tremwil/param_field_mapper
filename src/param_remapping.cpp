@@ -32,7 +32,7 @@ cpp::result<RemappedParamFile, ParamFileRemapError> RemappedParamFile::try_remap
     SYSTEM_INFO sysinfo;
     GetSystemInfo(&sysinfo);
 
-    auto file = file_cap->param_file;
+    auto file = file_cap->param_file;    
     std::span file_bytes { (uint8_t*)file, file_cap->param_file_size };
 
     // Someone at fromsoft should never be allowed to write code again
@@ -41,8 +41,10 @@ cpp::result<RemappedParamFile, ParamFileRemapError> RemappedParamFile::try_remap
     // and binary search on that instead!?!?!?!?!?!?!?
     //
     // We'll have to copy it over too
+    size_t sorted_tbl_entry_count = *(int32_t*)((intptr_t)file - 12);
     std::span sorted_table { 
-        (uint8_t*)file + utils::align_up(*(int32_t*)((intptr_t)file - 16), 16), 8ull * file->row_count
+        (uint8_t*)file + utils::align_up(*(int32_t*)((intptr_t)file - 16), 16),
+        8 * sorted_tbl_entry_count
     };
 
     RemappedParamFile remap {
@@ -106,7 +108,7 @@ cpp::result<RemappedParamFile, ParamFileRemapError> RemappedParamFile::try_remap
     }
 
     *(int32_t*)((intptr_t)remap.trap_file - 16) = sorted_table_ofs;
-    *(int32_t*)((intptr_t)remap.trap_file - 12) = file->row_count;
+    *(int32_t*)((intptr_t)remap.trap_file - 12) = sorted_tbl_entry_count;
 
     // Copy sorted table 
 
