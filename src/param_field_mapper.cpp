@@ -114,7 +114,9 @@ namespace pfm
             Panic("Failed to find SoloParamRepository::getParamResCapById function");
         }
 
-        orig_param_lookup = patcher.jmp_hook(lookup_addr, &solo_param_hook_thunk);
+        orig_param_lookup.store(patcher.jmp_hook(lookup_addr, &solo_param_hook_thunk), std::memory_order_release);
+        orig_param_lookup.notify_all();
+
         if (!orig_param_lookup) {
             Panic("Failed to JMP hook SoloParamRepository::getParamResCapById function at {:x}", lookup_addr);
         }
@@ -137,7 +139,8 @@ namespace pfm
                 }).detach();
             }
         }
-        return orig_param_lookup(solo_param, bucket, index_in_bucket);
+        orig_param_lookup.wait(nullptr, std::memory_order_acquire);
+        return orig_param_lookup.load(std::memory_order_relaxed)(solo_param, bucket, index_in_bucket);
     }
 
     void ParamFieldMapper::hook_memcpy() {
@@ -148,7 +151,9 @@ namespace pfm
             Panic("Failed to find memcpy function");
         }
 
-        orig_memcpy = patcher.jmp_hook(memcpy_addr, &memcpy_hook_thunk);
+        orig_memcpy.store(patcher.jmp_hook(memcpy_addr, &memcpy_hook_thunk), std::memory_order_release);
+        orig_memcpy.notify_all();
+
         if (!orig_memcpy) {
             Panic("Failed to JMP hook game memcpy function at {:x}", memcpy_addr);
         }
@@ -305,8 +310,6 @@ namespace pfm
         if (!hook_addr) {
             Panic("Failed to generate instruction hook at {:x}", code_address);
         }
-
-        // SPDLOG_DEBUG("{:x}, {:x}", code_address, hook_addr);
         
         ctx->Rip = hook_addr;
         patch_map[code_address] = hook_addr;

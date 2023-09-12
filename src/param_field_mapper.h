@@ -64,8 +64,8 @@ namespace pfm
 
         Timer def_dump_timer;
 
-        void* (*orig_memcpy)(void*, void*, size_t); 
-        void* (*orig_param_lookup)(SoloParamRepository*, uint32_t, uint32_t);
+        std::atomic<void* (*)(void*, void*, size_t)> orig_memcpy; 
+        std::atomic<void* (*)(SoloParamRepository*, uint32_t, uint32_t)> orig_param_lookup;
 
         void do_param_remaps();
 
@@ -84,7 +84,8 @@ namespace pfm
         LONG veh(EXCEPTION_POINTERS* ex);
 
         void* memcpy_hook(void* dest, void* src, size_t size) {
-            return orig_memcpy(dest, adjust_param_ptr(src), size);
+            orig_memcpy.wait(nullptr, std::memory_order_acquire);
+            return orig_memcpy.load(std::memory_order_relaxed)(dest, adjust_param_ptr(src), size);
         }
 
         static LONG veh_thunk(EXCEPTION_POINTERS* ex) {
