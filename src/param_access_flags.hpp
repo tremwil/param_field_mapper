@@ -74,7 +74,7 @@ struct ParamAccessFlagsTally {
                 max = sizes[i];
             }
         }
-        return { (num_positive > 1) << max_i, num_positive != 1 };
+        return { (num_positive <= 1) << max_i, num_positive != 1 };
     }
 
     /// Returns type which appeared the most, and a bool indicating if a conflict exists.
