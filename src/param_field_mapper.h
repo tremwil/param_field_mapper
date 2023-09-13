@@ -13,13 +13,14 @@
 #include "hooks/hook_arena.h"
 #include "hooks/control_flow_graph.h"
 #include "hooks/mass_instruction_patcher.hpp"
-#include "paramdef_typemap.h"
+#include "xml_paramdef.hpp"
 
 #include "field_deduction.hpp"
 
 namespace pfm
 {
     struct PFMConfig {
+        int deduce_interval_ms = 1000;
         int dump_interval_ms = 10000;
         bool print_original_addresses = false;
         bool print_upheld_fields = true;
@@ -49,6 +50,8 @@ namespace pfm
 
     private:
         std::mutex mutex;
+        std::mutex defs_mutex;
+
         bool initialized = false;
         bool remaps_done = false;
         bool remaps_queued = false;
@@ -60,9 +63,11 @@ namespace pfm
         RemappedParamBlock remaps;
         MassInstructionPatcher patcher;
 
-        std::unordered_map<std::string, DeducedParamdef> defs;
+        std::unordered_map<std::string, DeducedParamdef> deduced_defs;
+        std::unordered_map<std::string, Paramdef> serialized_defs;
 
         Timer def_dump_timer;
+        Timer def_deduce_timer;
 
         std::atomic<void* (*)(void*, void*, size_t)> orig_memcpy; 
         std::atomic<void* (*)(SoloParamRepository*, uint32_t, uint32_t)> orig_param_lookup;

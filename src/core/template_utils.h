@@ -60,6 +60,11 @@ namespace pfm
 		{ std::hash<T>{}(a) } -> std::convertible_to<std::size_t>;
 	};
 
+	template<class... Ts>
+    struct Overloaded : Ts... { using Ts::operator()...; };
+    template<class... Ts>
+    Overloaded(Ts...) -> Overloaded<Ts...>; 
+
 #ifdef __clang__
 #define PFM_IS_CONSTEXPR(EXPR) pfm::is_constexpr_helper([] { \
 	_Pragma("clang diagnostic push") \

@@ -2,6 +2,8 @@
 #include <intrin.h>
 
 #include "fst/param_file.h"
+#include "core/panic.h"
+
 #include "param_access_flags.hpp"
 #include <spdlog/spdlog.h>
 
@@ -40,6 +42,11 @@ void DeducedParamdef::update_deductions(bool log_updates) {
         //     tally.size_1, tally.size_2, tally.size_4, tally.size_8, tally.uses_sib, *(uint8_t*)&ofs_flags);
 
         auto [size, size_conflict] = tally.deduce_size();
+        if (size == 0) {
+            Panic("Got zero size in nonzero offset flags block at 0x{:03x} in {}. This is impossible!",
+                i, remapped_file->param_name);
+        }
+
         if (size_conflict && !ofs_flags.size_conflict) {
             if (log_updates) SPDLOG_WARN("Size conflict for {} at offset 0x{:03x} (1: {}, 2: {}, 4: {}, 8: {})", 
                 remapped_file->param_name, i, tally.size_1, tally.size_2, tally.size_4, tally.size_8);

@@ -4,8 +4,10 @@
 #include "arxan_disabler.h"
 
 #include "mem/pattern.h"
+#include "param_access_flags.hpp"
 #include "spdlog/fmt/bin_to_hex.h"
 #include "spdlog/spdlog.h"
+#include "xml_paramdef.hpp"
 
 #include <Windows.h>
 
@@ -38,16 +40,19 @@ namespace pfm
 
         this->config = config;
 
+        load_existing_defs();
+
         patcher.prepare_module((intptr_t)GetModuleHandleA(nullptr));
         hook_solo_param_lookup();
 
         SPDLOG_INFO("Waiting for params to be loaded...");
-
         initialized = true;
     }
 
     void ParamFieldMapper::do_param_remaps() {
         std::lock_guard lock(mutex);
+        std::lock_guard lock_defs(defs_mutex);
+
         if (remaps_done) return;
 
         auto& param_repo = FD4ParamRepository::instance()->param_container;
@@ -66,44 +71,94 @@ namespace pfm
         hook_memcpy();
 
         for (const auto& f: remaps.remapped_files) {
-            defs[f.param_name] = { .remapped_file = &f };
+            auto [it, inserted] = serialized_defs.insert(std::make_pair(f.param_name, Paramdef {
+                .param_name = f.param_name
+            }));
+            auto& def = it->second;
+            if (!inserted && def.row_size != f.row_size) {
+                Panic("Row size of existing def for {} ({}) does not match computed value ({})",
+                    f.param_name, def.row_size, f.row_size);
+            }
+
+            def.data_version = f.true_file->paramdef_data_version;
+            def.big_endian = f.true_file->is_big_endian;
+            def.unicode = f.true_file->is_unicode();
+            def.row_size = f.row_size;
+
+            // std::string_view param_type { f.true_file->param_type() };
+            // if (!def.param_type.has_value() && !param_type.empty() &&
+            //     !std::any_of(param_type.begin(), param_type.end(), [](auto c) { return c < '!' || c > 'z'; })) 
+            // {
+            //     def.param_type = param_type;
+            // }
+
+            deduced_defs[f.param_name] = { .remapped_file = &f };
             f.replace_original_file();
         }
 
-        def_dump_timer.interval() = 1000; // config.dump_interval_ms;
+        def_dump_timer.interval() = config.dump_interval_ms;
         def_dump_timer.start([this] { dump_defs(); });
+
+        def_deduce_timer.interval() = config.deduce_interval_ms;
+        def_deduce_timer.start([this] {
+            std::lock_guard lock(defs_mutex);
+            for (auto& [k, d]: deduced_defs) {
+                d.update_deductions(true);
+            }
+        });
+
         remaps_done = true;
     }
 
     void ParamFieldMapper::load_existing_defs() {
-        
-        // SPDLOG_INFO("Loading existing paramdefs...");
+        std::lock_guard lock(defs_mutex);
+        SPDLOG_INFO("Loading existing paramdefs...");
 
-        // auto dump_path = utils::dll_folder() / "paramdefs";
-        // fs::create_directory(dump_path);
+        auto dump_path = utils::dll_folder() / "paramdefs";
+        fs::create_directory(dump_path);
 
-        // size_t num_loaded = 0;
-        // for (const auto& f : fs::directory_iterator(dump_path)) {
-        //     if (!f.is_regular_file() || f.path().extension() != ".xml") {
-        //         SPDLOG_WARN("{} is not an XML paramdef, skipping", f.path().string());
-        //         continue;
-        //     }
-        //     if (auto def = ParamdefTypemap::from_xml(f.path().string(), config.def_parse_options)) {
-        //         defs[def->param_name] = std::move(*def);
-        //         num_loaded++;
-        //         SPDLOG_TRACE("Loaded paramdef {}", f.path().string());
-        //     }
-        // }
-        // SPDLOG_INFO("Loaded {} existing XML paramdefs", num_loaded);
+        size_t num_loaded = 0;
+        for (const auto& f : fs::directory_iterator(dump_path)) {
+            if (!f.is_regular_file() || f.path().extension() != ".xml") {
+                SPDLOG_WARN("{} is not an XML paramdef, skipping", f.path().string());
+                continue;
+            }
+            if (auto def = Paramdef::from_xml(f.path().string(), config.def_parse_options)) {
+                serialized_defs[def->param_name] = std::move(*def);
+                num_loaded++;
+                SPDLOG_TRACE("Loaded paramdef {}", f.path().string());
+            }
+        }
+        SPDLOG_INFO("Loaded {} existing XML paramdefs", num_loaded);
     }
 
     void ParamFieldMapper::dump_defs() {
-        //auto dump_path = utils::dll_folder() / "paramdefs";
-        //fs::create_directory(dump_path);
+        std::lock_guard lock(defs_mutex);
 
-        for (auto& [k, d]: defs) {
-            d.update_deductions(true);
+        auto dump_path = utils::dll_folder() / "paramdefs";
+        fs::create_directory(dump_path);
+
+        for (auto& [k, d]: deduced_defs) {
+            if (!serialized_defs.contains(k)) continue;
+
+            auto& sd = serialized_defs[k];
+            sd.fields.clear();
+            for (const auto& f : d.fields) {
+                DefField df { .type_size_bytes = f.size_bytes };
+                
+                if (f.maybe_array) df.info = DefField::Array(1);
+                
+                if (f.type == FieldBaseType::UnkInt) df.type = DefField::ValueType::UnkInt;
+                else if (f.type == FieldBaseType::Signed) df.type = DefField::ValueType::Sint;
+                else if (f.type == FieldBaseType::Unsigned) df.type = DefField::ValueType::Uint;
+                else if (f.type == FieldBaseType::Float) df.type = DefField::ValueType::Float;
+
+                sd.fields[f.offset * 8] = std::move(df);
+            }
+
+            sd.serialize_to_xml((dump_path / (k + ".xml")).string(), config.def_serialize_options);
         }
+        SPDLOG_INFO("Dumped {} paramdefs to disk", deduced_defs.size());
     }
 
     void ParamFieldMapper::hook_solo_param_lookup() {

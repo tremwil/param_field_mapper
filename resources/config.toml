@@ -30,19 +30,20 @@ dump_original_addresses = true
 [defs.parsing]
 # Regex used to determine if a field should be considered unknown/unamed and thus
 # susceptible to type overrules via automatic deduction
-unnamed_field_regex = "unk_.*"
+unnamed_field_regex = "^unk_.*"
 # Regex used to determine if a field should be considered "untyped memory" and thus 
 # ignored 
-untyped_memory_regex = "untyped_.*"
+untyped_memory_regex = "^untyped_.*"
 # If true, will ignore comments (and thus delete them when reserializing) 
 ignore_comments = false
-# If true, will ignore param types (and thus use the ones in param files instead)
+# If true, will ignore param types (and thus use the ones in param files instead), defaulting
+# to the param name if not present
 ignore_param_types = false
 
 
 [defs.serialization]
-# If true, acessing instruction addresses will be added to a comment before the field XML node
-store_accesses = true
-# If true, the type confidence value used to handle conflicts internally will be saved as an extra attribute
-# to the field's XML node. Should not be disabled if you want to continue collecting data with the same defs!
-store_type_confidence = true
+# If true, Information about field conflicts will be added as a comment before the field XML node
+conflict_comments = true
+# Type prefix (i.e. "s" for s8/s16/s32/etc) used for integers whose signedness could not be deduced. 
+# Can be used to default to a particular signedness, or use a new type entirely for more information.
+unk_int_prefix = "s"

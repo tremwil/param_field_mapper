@@ -2,8 +2,6 @@
 #include "param_field_mapper.h"
 #include "arxan_disabler.h"
 
-#include "paramdef_typemap.h"
-
 #include "spdlog/common.h"
 #include "spdlog/spdlog.h"
 #include "spdlog/sinks/basic_file_sink.h"
@@ -162,8 +160,8 @@ void bootstrap(bool is_entry_hook) {
         };
         auto& def_dump_opts = toml::find(tbl, "defs", "serialization");
         config.def_serialize_options = {
-            .store_accesses = toml::find<bool>(def_dump_opts, "store_accesses"),
-            .store_type_confidence = toml::find<bool>(def_dump_opts, "store_type_confidence")
+            .conflict_comments = toml::find<bool>(def_dump_opts, "conflict_comments"),
+            .unk_int_prefix = toml::find<std::string>(def_dump_opts, "unk_int_prefix")
         };
     }
     catch (std::exception& e) {
