@@ -40,6 +40,11 @@ ParamAccessFlags::from_instruction(const uint8_t *instruction_bytes) {
         case 64: flags.size_8 = true; break;
         default: return cpp::fail(Error::BadLoadSize);
     }
+
+    // Fromsoft doesn't use 64-bit integer types in params!
+    if (flags.size_8 && mem_op->element_type != ZYDIS_ELEMENT_TYPE_FLOAT64) {
+        return cpp::fail(Error::IsSimd); // Should make a new error but idc
+    }
     
     if (instruction.mnemonic == ZYDIS_MNEMONIC_MOVSX || instruction.mnemonic == ZYDIS_MNEMONIC_MOVSXD) {
         flags.type_signed = true; 
