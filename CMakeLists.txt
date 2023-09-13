@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.23)
 project(
     param_field_mapper 
-    VERSION 1.1.1
+    VERSION 1.2.0
     LANGUAGES CXX C
 )
 
